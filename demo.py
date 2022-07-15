@@ -4,6 +4,7 @@ Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import os
 import multiprocessing as mp
 
+# import torch
 import cv2
 import tqdm
 
@@ -18,6 +19,9 @@ CONFIG_FILE = "configs/SOLOv2/R50_3x.yaml"
 OPTS = ["MODEL.WEIGHTS", "SOLOv2_R50_3x.pth"]
 CONFIDENCE_THRESHOLD = 0.3
 VIDEO_INPUT = "/home/allysakate/Videos/ffmpeg_capture_6-000.mp4"
+TEST_FOLDER = "media/test_solov2_classes"
+MODEL_DEVICE = "cuda:0"  # cpu
+CLASS_LIST = [0, 1, 2, 3, 5, 7]
 # VIDEO_OUTPUT = "/home/allysakate/Videos/ffmpeg_capture_6-000_OUT.mp4"
 VIDEO_OUTPUT = None
 
@@ -27,6 +31,9 @@ def setup_config():
     configuration = get_cfg()
     configuration.merge_from_file(CONFIG_FILE)
     configuration.merge_from_list(OPTS)
+    # num_gpu = torch.cuda.device_count()
+    # configuration.MODEL.DEVICE = "cuda:0" if num_gpu > 0 else "cpu"
+    configuration.MODEL.DEVICE = MODEL_DEVICE
     # Set score_threshold for builtin models
     configuration.MODEL.RETINANET.SCORE_THRESH_TEST = CONFIDENCE_THRESHOLD
     configuration.MODEL.ROI_HEADS.SCORE_THRESH_TEST = CONFIDENCE_THRESHOLD
@@ -43,6 +50,9 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     logger = setup_logger()
     # logger.info("Arguments: " + str(args))
+
+    if not os.path.exists(TEST_FOLDER):
+        os.makedirs(TEST_FOLDER)
 
     cfg = setup_config()
 
@@ -74,15 +84,17 @@ if __name__ == "__main__":
             )
         assert os.path.isfile(VIDEO_INPUT)
         CNTR = 0
-        for vis_frame in tqdm.tqdm(demo.run_on_video(video), total=num_frames):
+        for vis_frame in tqdm.tqdm(
+            demo.run_on_video(video, CLASS_LIST), total=num_frames
+        ):
             if VIDEO_OUTPUT:
                 output_file.write(vis_frame)
             else:
-                # cv2.namedWindow(basename, cv2.WINDOW_NORMAL)
-                # cv2.imshow(basename, vis_frame)
-                # if cv2.waitKey(1) == 27:
-                #     break  # esc to quit
-                img_name = f"media/images/{CNTR}.jpg"
+                cv2.namedWindow(basename, cv2.WINDOW_NORMAL)
+                cv2.imshow(basename, vis_frame)
+                if cv2.waitKey(1) == 27:
+                    break  # esc to quit
+                img_name = f"{TEST_FOLDER}/{CNTR}.jpg"
                 cv2.imwrite(img_name, vis_frame)
             CNTR += 1
         video.release()

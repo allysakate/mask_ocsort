@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 
 from detectron2.data import MetadataCatalog
 from detectron2.engine.defaults import DefaultPredictor
-from detectron2.utils.video_visualizer import VideoVisualizer
 from detectron2.utils.visualizer import ColorMode, Visualizer
 
 from models.utils.visualizer import TextVisualizer
+from models.utils.video_visualizer import VideoVisualizer
 
 
 class VisualizationDemo(object):
@@ -106,7 +106,7 @@ class VisualizationDemo(object):
             axes[i // 2][i % 2].imshow(basis_viz)
         plt.show()
 
-    def run_on_video(self, video):
+    def run_on_video(self, video, class_list):
         """
         Visualizes predictions on frames of the input video.
 
@@ -119,7 +119,7 @@ class VisualizationDemo(object):
         """
         video_visualizer = VideoVisualizer(self.metadata, self.instance_mode)
 
-        def process_predictions(frame, predictions):
+        def process_predictions(frame, predictions, class_list):
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             if "panoptic_seg" in predictions:
                 panoptic_seg, segments_info = predictions["panoptic_seg"]
@@ -129,7 +129,7 @@ class VisualizationDemo(object):
             elif "instances" in predictions:
                 predictions = predictions["instances"].to(self.cpu_device)
                 vis_frame = video_visualizer.draw_instance_predictions(
-                    frame, predictions
+                    frame, predictions, class_list
                 )
             elif "sem_seg" in predictions:
                 vis_frame = video_visualizer.draw_sem_seg(
@@ -153,15 +153,15 @@ class VisualizationDemo(object):
                 if cnt >= buffer_size:
                     frame = frame_data.popleft()
                     predictions = self.predictor.get()
-                    yield process_predictions(frame, predictions)
+                    yield process_predictions(frame, predictions, class_list)
 
             while len(frame_data):
                 frame = frame_data.popleft()
                 predictions = self.predictor.get()
-                yield process_predictions(frame, predictions)
+                yield process_predictions(frame, predictions, class_list)
         else:
             for frame in frame_gen:
-                yield process_predictions(frame, self.predictor(frame))
+                yield process_predictions(frame, self.predictor(frame), class_list)
 
 
 class AsyncPredictor:
