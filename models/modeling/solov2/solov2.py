@@ -129,6 +129,7 @@ class SOLOv2(nn.Module):
         cate_pred, kernel_pred = self.ins_head(ins_features)
 
         # mask branch
+        # TODO: Get mask features
         mask_features = [features[f] for f in self.mask_in_features]
         mask_pred = self.mask_head(mask_features)
 

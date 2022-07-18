@@ -1,6 +1,3 @@
-"""
-Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-"""
 import os
 import multiprocessing as mp
 
@@ -13,17 +10,23 @@ from detectron2.utils.logger import setup_logger
 from predictor import VisualizationDemo
 from models.config import get_cfg
 
+from trackers.ocsort_tracker.ocsort import OCSort
+
+
 # constants
 WINDOW_NAME = "solov2 deep ocsort"
 CONFIG_FILE = "configs/SOLOv2/R50_3x.yaml"
 OPTS = ["MODEL.WEIGHTS", "SOLOv2_R50_3x.pth"]
-CONFIDENCE_THRESHOLD = 0.3
+CONFIDENCE_THRESHOLD = 0.5
 VIDEO_INPUT = "/home/allysakate/Videos/ffmpeg_capture_6-000.mp4"
 TEST_FOLDER = "media/test_solov2_classes"
 MODEL_DEVICE = "cuda:0"  # cpu
 CLASS_LIST = [0, 1, 2, 3, 5, 7]
 # VIDEO_OUTPUT = "/home/allysakate/Videos/ffmpeg_capture_6-000_OUT.mp4"
 VIDEO_OUTPUT = None
+TRACK_THRESH = 0.3
+IOU_THRESH = 0.3
+USE_BYTE = False
 
 
 def setup_config():
@@ -39,6 +42,7 @@ def setup_config():
     configuration.MODEL.ROI_HEADS.SCORE_THRESH_TEST = CONFIDENCE_THRESHOLD
     configuration.MODEL.FCOS.INFERENCE_TH_TEST = CONFIDENCE_THRESHOLD
     configuration.MODEL.MEInst.INFERENCE_TH_TEST = CONFIDENCE_THRESHOLD
+    # configuration.MODEL.SOLOV2.SCORE_THR = CONFIDENCE_THRESHOLD
     configuration.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH = (
         CONFIDENCE_THRESHOLD
     )
@@ -83,9 +87,13 @@ if __name__ == "__main__":
                 isColor=True,
             )
         assert os.path.isfile(VIDEO_INPUT)
-        CNTR = 0
+        frame_id = 0
+        tracker = OCSort(
+            det_thresh=TRACK_THRESH, iou_threshold=IOU_THRESH, use_byte=USE_BYTE
+        )
+
         for vis_frame in tqdm.tqdm(
-            demo.run_on_video(video, CLASS_LIST), total=num_frames
+            demo.run_on_video(video, tracker, CLASS_LIST), total=num_frames
         ):
             if VIDEO_OUTPUT:
                 output_file.write(vis_frame)
@@ -94,9 +102,9 @@ if __name__ == "__main__":
                 cv2.imshow(basename, vis_frame)
                 if cv2.waitKey(1) == 27:
                     break  # esc to quit
-                img_name = f"{TEST_FOLDER}/{CNTR}.jpg"
+                img_name = f"{TEST_FOLDER}/{frame_id}.jpg"
                 cv2.imwrite(img_name, vis_frame)
-            CNTR += 1
+            frame_id += 1
         video.release()
         if VIDEO_OUTPUT:
             output_file.release()

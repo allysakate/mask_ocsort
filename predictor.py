@@ -106,7 +106,7 @@ class VisualizationDemo(object):
             axes[i // 2][i % 2].imshow(basis_viz)
         plt.show()
 
-    def run_on_video(self, video, class_list):
+    def run_on_video(self, video, tracker, class_list):
         """
         Visualizes predictions on frames of the input video.
 
@@ -119,7 +119,8 @@ class VisualizationDemo(object):
         """
         video_visualizer = VideoVisualizer(self.metadata, self.instance_mode)
 
-        def process_predictions(frame, predictions, class_list):
+        def process_predictions(frame, predictions, tracker, class_list):
+            frame_orig = frame
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             if "panoptic_seg" in predictions:
                 panoptic_seg, segments_info = predictions["panoptic_seg"]
@@ -129,15 +130,18 @@ class VisualizationDemo(object):
             elif "instances" in predictions:
                 predictions = predictions["instances"].to(self.cpu_device)
                 vis_frame = video_visualizer.draw_instance_predictions(
-                    frame, predictions, class_list
+                    frame, predictions, tracker, class_list
                 )
             elif "sem_seg" in predictions:
                 vis_frame = video_visualizer.draw_sem_seg(
                     frame, predictions["sem_seg"].argmax(dim=0).to(self.cpu_device)
                 )
 
-            # Converts Matplotlib RGB format to OpenCV BGR format
-            vis_frame = cv2.cvtColor(vis_frame.get_image(), cv2.COLOR_RGB2BGR)
+            if vis_frame:
+                # Converts Matplotlib RGB format to OpenCV BGR format
+                vis_frame = cv2.cvtColor(vis_frame.get_image(), cv2.COLOR_RGB2BGR)
+            else:
+                vis_frame = frame_orig
             return vis_frame
 
         frame_gen = self._frame_from_video(video)
@@ -153,15 +157,17 @@ class VisualizationDemo(object):
                 if cnt >= buffer_size:
                     frame = frame_data.popleft()
                     predictions = self.predictor.get()
-                    yield process_predictions(frame, predictions, class_list)
+                    yield process_predictions(frame, predictions, tracker, class_list)
 
             while len(frame_data):
                 frame = frame_data.popleft()
                 predictions = self.predictor.get()
-                yield process_predictions(frame, predictions, class_list)
+                yield process_predictions(frame, predictions, tracker, class_list)
         else:
             for frame in frame_gen:
-                yield process_predictions(frame, self.predictor(frame), class_list)
+                yield process_predictions(
+                    frame, self.predictor(frame), tracker, class_list
+                )
 
 
 class AsyncPredictor:
