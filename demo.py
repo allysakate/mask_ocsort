@@ -12,7 +12,7 @@ from detectron2.data import MetadataCatalog
 from detectron2.utils.visualizer import _create_text_labels
 from models.config import get_cfg
 
-from trackers.ocsort_tracker.ocsort import OCSort
+from trackers.ocsort_tracker import OCSort, Detection
 from trackers.tracking_utils.timer import Timer
 
 
@@ -104,14 +104,23 @@ def post_process(frame, predictions):
         )
 
         if predictions.has("pred_masks"):
-            masks = predictions.pred_masks
-            masks = masks[filter_mask]
+            pred_masks = predictions.pred_masks
+            pred_masks = pred_masks[filter_mask]
 
         else:
-            masks = None
+            pred_masks = None
 
-        masks = None if masks is None else masks[visibilities]
-        frame_masks = masks
+        pred_masks = None if pred_masks is None else pred_masks[visibilities]
+        seg_masks = pred_masks
+
+        if predictions.has("feat_masks"):
+            feat_masks = predictions.feat_masks
+            feat_masks = feat_masks[filter_mask]
+
+        else:
+            feat_masks = None
+
+        feat_masks = None if feat_masks is None else feat_masks[visibilities]
 
         labels = _create_text_labels(
             classes, scores, metadata.get("thing_classes", None)
@@ -126,8 +135,8 @@ def post_process(frame, predictions):
         areas = None
         if boxes is not None:
             areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
-        elif masks is not None:
-            areas = np.asarray([x.area() for x in masks])
+        elif pred_masks is not None:
+            areas = np.asarray([x.area() for x in pred_masks])
 
         frame_boxes = None
         if areas is not None:
@@ -136,13 +145,18 @@ def post_process(frame, predictions):
             labels = (
                 [labels[idx] for idx in sorted_idxs] if labels is not None else None
             )
-            masks = [masks[idx] for idx in sorted_idxs] if masks is not None else None
+            pred_masks = (
+                [pred_masks[idx] for idx in sorted_idxs]
+                if pred_masks is not None
+                else None
+            )
             scores = scores[sorted_idxs]
-            frame_masks = frame_masks[sorted_idxs, :, :]
-            if frame_masks is not None:
-                frame_boxes = masks_to_boxes(frame_masks)
+            seg_masks = seg_masks[sorted_idxs, :, :]
+            feat_masks = feat_masks[sorted_idxs, :, :]
+            if seg_masks is not None:
+                frame_boxes = masks_to_boxes(seg_masks)
 
-        return frame_boxes, scores, labels
+        return feat_masks, frame_boxes, scores, labels
 
 
 def get_color(idx):
@@ -234,14 +248,21 @@ def main(cfg, predictor, metadata):
             )
         ret_val, frame = video.read()
         if ret_val:
+            detections = []
             raw_img = frame
             timer.tic()
             predictions = predictor(frame)
             predictions = predictions["instances"].to(CPU_DEVICE)
-            boxes, scores, labels = post_process(frame, predictions)
+            feat_masks, boxes, scores, labels = post_process(frame, predictions)
             if boxes.any():
                 # TODO: tracking
-                targets = tracker.update(boxes, scores, [height, width], (1080, 1920))
+                for feat, box, score, label in zip(feat_masks, boxes, scores, labels):
+                    det = Detection(np.array(box), score, label, np.array(feat))
+                    detections.append(det)
+                detections = np.array(detections)
+                targets = tracker.update(
+                    detections, boxes, scores, [height, width], (1080, 1920)
+                )
                 track_tlwhs = []
                 track_ids = []
                 for tlbrs in targets:

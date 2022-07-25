@@ -29,6 +29,8 @@ from .ocsort import (
     speed_direction,
 )
 
+from .detection import Detection
+
 __all__ = [
     "iou_batch",
     "giou_batch",
@@ -53,4 +55,5 @@ __all__ = [
     "convert_bbox_to_z",
     "convert_x_to_bbox",
     "speed_direction",
+    "Detection",
 ]

@@ -235,7 +235,7 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, bboxes, scores, img_info, img_size):
+    def update(self, detections, bboxes, scores, img_info, img_size):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score],[x1,y1,x2,y2,score],...]
@@ -248,14 +248,18 @@ class OCSort(object):
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
         bboxes /= scale
         dets = np.concatenate((bboxes, np.expand_dims(scores, axis=-1)), axis=1)
+
         inds_low = scores > 0.1
         inds_high = scores < self.det_thresh
         inds_second = np.logical_and(
             inds_low, inds_high
         )  # self.det_thresh > score > 0.1, for second matching
         dets_second = dets[inds_second]  # detections for second matching
+        # detections_sm = detections[inds_second]
+
         remain_inds = scores > self.det_thresh
         dets = dets[remain_inds]
+        # detections = detections[remain_inds]
         # get predicted locations from existing trackers.
         trks = np.zeros((len(self.trackers), 5))
         to_del = []

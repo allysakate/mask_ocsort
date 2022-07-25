@@ -150,7 +150,12 @@ class SOLOv2(nn.Module):
             ]
             # do inference for results.
             results = self.inference(
-                cate_pred, kernel_pred, mask_pred, images.image_sizes, batched_inputs
+                cate_pred,
+                kernel_pred,
+                mask_pred,
+                mask_features[-1],
+                images.image_sizes,
+                batched_inputs,
             )
             return results
 
@@ -449,7 +454,9 @@ class SOLOv2(nn.Module):
             F.interpolate(feats[4], size=feats[3].shape[-2:], mode="bilinear"),
         )
 
-    def inference(self, pred_cates, pred_kernels, pred_masks, cur_sizes, images):
+    def inference(
+        self, pred_cates, pred_kernels, pred_masks, feat_masks, cur_sizes, images
+    ):
         assert len(pred_cates) == len(pred_kernels)
 
         results = []
@@ -479,13 +486,18 @@ class SOLOv2(nn.Module):
 
             # inference for single image.
             result = self.inference_single_image(
-                pred_cate, pred_kernel, pred_mask, cur_sizes[img_idx], ori_size
+                pred_cate,
+                pred_kernel,
+                pred_mask,
+                feat_masks,
+                cur_sizes[img_idx],
+                ori_size,
             )
             results.append({"instances": result})
         return results
 
     def inference_single_image(
-        self, cate_preds, kernel_preds, seg_preds, cur_size, ori_size
+        self, cate_preds, kernel_preds, seg_preds, seg_feats, cur_size, ori_size
     ):
         # overall info.
         h, w = cur_size
@@ -501,6 +513,7 @@ class SOLOv2(nn.Module):
             results.scores = torch.tensor([])
             results.pred_classes = torch.tensor([])
             results.pred_masks = torch.tensor([])
+            results.feat_masks = torch.tensor([])
             results.pred_boxes = Boxes(torch.tensor([]))
             return results
 
@@ -525,6 +538,7 @@ class SOLOv2(nn.Module):
         batch_size, channel = kernel_preds.shape
         kernel_preds = kernel_preds.view(batch_size, channel, 1, 1)
         seg_preds = F.conv2d(seg_preds, kernel_preds, stride=1).squeeze(0).sigmoid()
+        seg_feats = F.conv2d(seg_feats, kernel_preds, stride=1).squeeze(0).sigmoid()
 
         # mask.
         seg_masks = seg_preds > self.mask_threshold
@@ -537,11 +551,13 @@ class SOLOv2(nn.Module):
             results.scores = torch.tensor([])
             results.pred_classes = torch.tensor([])
             results.pred_masks = torch.tensor([])
+            results.feat_masks = torch.tensor([])
             results.pred_boxes = Boxes(torch.tensor([]))
             return results
 
         seg_masks = seg_masks[keep, ...]
         seg_preds = seg_preds[keep, ...]
+        seg_feats = seg_feats[keep, ...]
         sum_masks = sum_masks[keep]
         cate_scores = cate_scores[keep]
         cate_labels = cate_labels[keep]
@@ -556,6 +572,7 @@ class SOLOv2(nn.Module):
             sort_inds = sort_inds[: self.max_before_nms]
         seg_masks = seg_masks[sort_inds, :, :]
         seg_preds = seg_preds[sort_inds, :, :]
+        seg_feats = seg_feats[sort_inds, :, :]
         sum_masks = sum_masks[sort_inds]
         cate_scores = cate_scores[sort_inds]
         cate_labels = cate_labels[sort_inds]
@@ -588,10 +605,12 @@ class SOLOv2(nn.Module):
             results.scores = torch.tensor([])
             results.pred_classes = torch.tensor([])
             results.pred_masks = torch.tensor([])
+            results.feat_masks = torch.tensor([])
             results.pred_boxes = Boxes(torch.tensor([]))
             return results
 
         seg_preds = seg_preds[keep, :, :]
+        seg_feats = seg_feats[keep, :, :]
         cate_scores = cate_scores[keep]
         cate_labels = cate_labels[keep]
 
@@ -600,6 +619,7 @@ class SOLOv2(nn.Module):
         if len(sort_inds) > self.max_per_img:
             sort_inds = sort_inds[: self.max_per_img]
         seg_preds = seg_preds[sort_inds, :, :]
+        seg_feats = seg_feats[sort_inds, :, :]
         cate_scores = cate_scores[sort_inds]
         cate_labels = cate_labels[sort_inds]
 
@@ -614,6 +634,7 @@ class SOLOv2(nn.Module):
         results.pred_classes = cate_labels
         results.scores = cate_scores
         results.pred_masks = seg_masks
+        results.feat_masks = seg_feats
 
         # get bbox from mask
         pred_boxes = torch.zeros(seg_masks.size(0), 4)
