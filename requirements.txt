@@ -1,4 +1,4 @@
-pre-commit
+pre-commit # 2.20.0
 opencv-python # 4.6.0.66
 scikit-image # 0.19.3
 filterpy # 1.4.5
