@@ -9,10 +9,10 @@ from torchvision.ops import masks_to_boxes
 from detectron2.utils.logger import setup_logger
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.data import MetadataCatalog
-from detectron2.utils.visualizer import _create_text_labels
 from models.config import get_cfg
 
 from trackers.deep_sort import tracker, detection, nn_matching
+from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
 
 
@@ -22,7 +22,7 @@ CONFIG_FILE = "configs/SOLOv2/R50_3x.yaml"
 OPTS = ["MODEL.WEIGHTS", "SOLOv2_R50_3x.pth"]
 CONFIDENCE_THRESHOLD = 0.5
 VIDEO_INPUT = "/home/catchall/Videos/projects/ch01_20181212105607_6000_10.mp4"
-VIS_FOLDER = "/home/catchall/Videos/projects/test_solov2_ocsort_deepsort"
+VIS_FOLDER = "/home/catchall/Videos/projects/test_solov2_ocsort_modified"
 IS_SAVE_RESULT = False
 MODEL_DEVICE = "cuda:0"  # cpu
 CLASS_LIST = [0, 1, 2, 3, 5, 7]
@@ -30,7 +30,7 @@ CLASS_LIST = [0, 1, 2, 3, 5, 7]
 VIDEO_OUTPUT = None
 TRACK_THRESH = 0.3
 IOU_THRESH = 0.3
-USE_BYTE = False
+USE_OCSORT = True
 CPU_DEVICE = torch.device("cpu")
 _ASPECT_RATIO_THRESH = 1.6
 _MIN_BOX_AREA_THRESH = 10
@@ -121,14 +121,14 @@ def post_process(frame, predictions):
 
         feat_masks = None if feat_masks is None else feat_masks[visibilities]
 
-        labels = _create_text_labels(
-            classes, scores, metadata.get("thing_classes", None)
-        )
-        labels = (
-            None
-            if labels is None
-            else [y[0] for y in filter(lambda x: x[1], zip(labels, visibilities))]
-        )  # noqa
+        # labels = _create_text_labels(
+        #     classes, scores, metadata.get("thing_classes", None)
+        # )
+        # labels = (
+        #     None
+        #     if labels is None
+        #     else [y[0] for y in filter(lambda x: x[1], zip(labels, visibilities))]
+        # )  # noqa
 
         # Display in largest to smallest order to reduce occlusion.
         areas = None
@@ -141,8 +141,8 @@ def post_process(frame, predictions):
         if areas is not None:
             sorted_idxs = np.argsort(-areas).tolist()
             # Re-order overlapped instances in descending order.
-            labels = (
-                [labels[idx] for idx in sorted_idxs] if labels is not None else None
+            classes = (
+                [classes[idx] for idx in sorted_idxs] if classes is not None else None
             )
             pred_masks = (
                 [pred_masks[idx] for idx in sorted_idxs]
@@ -155,7 +155,7 @@ def post_process(frame, predictions):
             if seg_masks is not None:
                 frame_boxes = masks_to_boxes(seg_masks)
 
-        return feat_masks, frame_boxes, scores, labels
+        return feat_masks, frame_boxes, scores, classes
 
 
 def get_color(idx):
@@ -165,7 +165,9 @@ def get_color(idx):
     return color
 
 
-def plot_tracking(image, tlwhs, obj_ids, scores=None, frame_id=0, fps=0.0, ids2=None):
+def plot_tracking(
+    image, tlwhs, obj_ids, classes, scores=None, frame_id=0, fps=0.0, ids2=None
+):
     im = np.ascontiguousarray(np.copy(image))
     im_h, im_w = im.shape[:2]
 
@@ -190,6 +192,10 @@ def plot_tracking(image, tlwhs, obj_ids, scores=None, frame_id=0, fps=0.0, ids2=
     )
 
     for i, tlwh in enumerate(tlwhs):
+        if classes:
+            label = classes[i]
+        else:
+            label = None
         x1, y1, w, h = tlwh
         intbox = tuple(map(int, (x1, y1, x1 + w, y1 + h)))
         obj_id = int(obj_ids[i])
@@ -209,7 +215,82 @@ def plot_tracking(image, tlwhs, obj_ids, scores=None, frame_id=0, fps=0.0, ids2=
             (0, 0, 255),
             thickness=text_thickness,
         )
+        if label:
+            cv2.putText(
+                im,
+                label,
+                (intbox[0], intbox[1] + 20),
+                cv2.FONT_HERSHEY_PLAIN,
+                text_scale,
+                (0, 0, 255),
+                thickness=text_thickness,
+            )
     return im
+
+
+def ocsort(
+    _tracker, frame_id, feat_masks, boxes, scores, classes, results, thing_classes
+):
+    targets = _tracker.update(feat_masks, boxes, scores, classes)
+    track_tlwhs = []
+    track_ids = []
+    track_classes = []
+    for tlbrs in targets:
+        box_width = tlbrs[2] - tlbrs[0]
+        box_height = tlbrs[3] - tlbrs[1]
+        tlwh = [
+            tlbrs[0],
+            tlbrs[1],
+            tlbrs[2] - tlbrs[0],
+            tlbrs[3] - tlbrs[1],
+        ]
+        tid = tlbrs[5]
+        tclass = int(tlbrs[4])
+        vertical = box_width / box_height > _ASPECT_RATIO_THRESH
+        if box_width * box_height > _MIN_BOX_AREA_THRESH and not vertical:
+            track_tlwhs.append(tlwh)
+            track_ids.append(tid)
+            if tclass in CLASS_LIST:
+                track_classes.append(thing_classes[tclass])
+            else:
+                track_classes.append(None)
+            results.append(
+                f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
+            )
+    return track_tlwhs, track_ids, track_classes, results
+
+
+def deepsort(
+    _tracker, frame_id, feat_masks, boxes, scores, classes, results, thing_classes
+):
+    detections = []
+    for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
+        feat = np.array(feat)
+        shape = min(feat.shape)
+        feature = np.resize(feat, (shape, shape)).flatten()
+        det = detection.Detection(np.array(box), score, thing_classes[label], feature)
+        detections.append(det)
+    _tracker.predict()
+    _tracker.update(detections)
+    track_tlwhs = []
+    track_ids = []
+    track_classes = []
+    for track in _tracker.tracks:
+        if not track.is_confirmed() or track.time_since_update > 1:
+            continue
+        tlwh = track.to_tlwh()
+        box_width = tlwh[2]
+        box_height = tlwh[3]
+        tid = track.track_id
+        vertical = box_width / box_height > _ASPECT_RATIO_THRESH
+        if box_width * box_height > _MIN_BOX_AREA_THRESH and not vertical:
+            track_tlwhs.append(tlwh)
+            track_ids.append(tid)
+            track_classes.append(track.classification)
+            results.append(
+                f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
+            )
+    return track_tlwhs, track_ids, track_classes, results
 
 
 def main(cfg, predictor, metadata):
@@ -231,8 +312,12 @@ def main(cfg, predictor, metadata):
         )
 
     frame_id = 0
-    metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
-    _tracker = tracker.Tracker(metric)
+    thing_classes = metadata.get("thing_classes", None)
+    if not USE_OCSORT:
+        metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
+        _tracker = tracker.Tracker(metric)
+    else:
+        _tracker = OCSort()
     timer = Timer()
     frame_id = 0
     results = []
@@ -246,43 +331,41 @@ def main(cfg, predictor, metadata):
             )
         ret_val, frame = video.read()
         if ret_val:
-            detections = []
             raw_img = frame
             timer.tic()
             predictions = predictor(frame)
             predictions = predictions["instances"].to(CPU_DEVICE)
-            feat_masks, boxes, scores, labels = post_process(frame, predictions)
+            feat_masks, boxes, scores, classes = post_process(frame, predictions)
             if boxes.any():
                 # TODO: tracking
-                for feat, box, score, label in zip(feat_masks, boxes, scores, labels):
-                    feat = np.array(feat)
-                    shape = min(feat.shape)
-                    feature = np.resize(feat, (shape, shape)).flatten()
-                    det = detection.Detection(np.array(box), score, label, feature)
-                    detections.append(det)
-                _tracker.predict()
-                _tracker.update(detections)
-                track_tlwhs = []
-                track_ids = []
-                for track in _tracker.tracks:
-                    if not track.is_confirmed() or track.time_since_update > 1:
-                        continue
-                    tlwh = track.to_tlwh()
-                    box_width = tlwh[2]
-                    box_height = tlwh[3]
-                    tid = track.track_id
-                    vertical = box_width / box_height > _ASPECT_RATIO_THRESH
-                    if box_width * box_height > _MIN_BOX_AREA_THRESH and not vertical:
-                        track_tlwhs.append(tlwh)
-                        track_ids.append(tid)
-                        results.append(
-                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
-                        )
+                if not USE_OCSORT:
+                    track_tlwhs, track_ids, track_classes, results = deepsort(
+                        _tracker,
+                        frame_id,
+                        feat_masks,
+                        boxes,
+                        scores,
+                        classes,
+                        results,
+                        thing_classes,
+                    )
+                else:
+                    track_tlwhs, track_ids, track_classes, results = ocsort(
+                        _tracker,
+                        frame_id,
+                        feat_masks,
+                        boxes,
+                        scores,
+                        classes,
+                        results,
+                        thing_classes,
+                    )
                 timer.toc()
                 res_image = plot_tracking(
                     raw_img,
                     track_tlwhs,
                     track_ids,
+                    track_classes,
                     frame_id=frame_id + 1,
                     fps=1.0 / timer.average_time,
                 )

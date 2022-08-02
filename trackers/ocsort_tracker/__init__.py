@@ -8,7 +8,6 @@ from .association import (
     linear_assignment,
     associate_detections_to_trackers,
     associate,
-    associate_kitti,
 )
 from .kalmanfilter import (
     KalmanFilterNew,
@@ -28,8 +27,6 @@ from .ocsort import (
     convert_x_to_bbox,
     speed_direction,
 )
-
-from .detection import Detection
 
 __all__ = [
     "iou_batch",
@@ -55,5 +52,4 @@ __all__ = [
     "convert_bbox_to_z",
     "convert_x_to_bbox",
     "speed_direction",
-    "Detection",
 ]
