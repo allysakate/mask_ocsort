@@ -12,7 +12,7 @@ from detectron2.data import MetadataCatalog
 from detectron2.utils.visualizer import _create_text_labels
 from models.config import get_cfg
 
-from trackers.ocsort_tracker import OCSort, Detection
+from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.tracking_utils.timer import Timer
 
 
@@ -21,8 +21,8 @@ WINDOW_NAME = "solov2 deep ocsort"
 CONFIG_FILE = "configs/SOLOv2/R50_3x.yaml"
 OPTS = ["MODEL.WEIGHTS", "SOLOv2_R50_3x.pth"]
 CONFIDENCE_THRESHOLD = 0.5
-VIDEO_INPUT = "/home/catchall/Videos/projects/ch01_20181212105607_6000.mp4"
-VIS_FOLDER = "/home/catchall/Videos/projects/test_solov2_ocsort_aligncorners"
+VIDEO_INPUT = "/home/catchall/Videos/projects/ch01_20181212105607_6000_10.mp4"
+VIS_FOLDER = "/home/catchall/Videos/projects/test_solov2_ocsort_deepsort"
 IS_SAVE_RESULT = False
 MODEL_DEVICE = "cuda:0"  # cpu
 CLASS_LIST = [0, 1, 2, 3, 5, 7]
@@ -79,9 +79,8 @@ def post_process(frame, predictions):
 
     scores = predictions.scores.numpy() if predictions.has("scores") else None
     class_mask = np.isin(classes, CLASS_LIST)
-    filter_mask = class_mask
-    # score_mask = scores >= _SCORE_THRESHOLD
-    # filter_mask = np.logical_and(class_mask, score_mask)
+    score_mask = scores >= TRACK_THRESH
+    filter_mask = np.logical_and(class_mask, score_mask)
 
     boxes = (
         predictions.pred_boxes.tensor.numpy() if predictions.has("pred_boxes") else None
@@ -232,9 +231,8 @@ def main(cfg, predictor, metadata):
         )
 
     frame_id = 0
-    tracker = OCSort(
-        det_thresh=TRACK_THRESH, iou_threshold=IOU_THRESH, use_byte=USE_BYTE
-    )
+    metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
+    _tracker = tracker.Tracker(metric)
     timer = Timer()
     frame_id = 0
     results = []
@@ -257,24 +255,22 @@ def main(cfg, predictor, metadata):
             if boxes.any():
                 # TODO: tracking
                 for feat, box, score, label in zip(feat_masks, boxes, scores, labels):
-                    det = Detection(np.array(box), score, label, np.array(feat))
+                    feat = np.array(feat)
+                    shape = min(feat.shape)
+                    feature = np.resize(feat, (shape, shape)).flatten()
+                    det = detection.Detection(np.array(box), score, label, feature)
                     detections.append(det)
-                detections = np.array(detections)
-                targets = tracker.update(
-                    detections, boxes, scores, [height, width], (1080, 1920)
-                )
+                _tracker.predict()
+                _tracker.update(detections)
                 track_tlwhs = []
                 track_ids = []
-                for tlbrs in targets:
-                    box_width = tlbrs[2] - tlbrs[0]
-                    box_height = tlbrs[3] - tlbrs[1]
-                    tlwh = [
-                        tlbrs[0],
-                        tlbrs[1],
-                        tlbrs[2] - tlbrs[0],
-                        tlbrs[3] - tlbrs[1],
-                    ]
-                    tid = tlbrs[4]
+                for track in _tracker.tracks:
+                    if not track.is_confirmed() or track.time_since_update > 1:
+                        continue
+                    tlwh = track.to_tlwh()
+                    box_width = tlwh[2]
+                    box_height = tlwh[3]
+                    tid = track.track_id
                     vertical = box_width / box_height > _ASPECT_RATIO_THRESH
                     if box_width * box_height > _MIN_BOX_AREA_THRESH and not vertical:
                         track_tlwhs.append(tlwh)
