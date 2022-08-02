@@ -1,5 +1,20 @@
+import torch
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+
+
+def cosine_batch(det_feats, trk_feats):
+    def _cosine_distance(metric, a, b):
+        a = torch.from_numpy(a)
+        b = torch.from_numpy(b)
+        return metric(a, b)
+
+    cost_matrix = np.zeros((len(det_feats), len(trk_feats)))
+    cosi = torch.nn.CosineSimilarity(dim=0)
+    for d_idx, det_feat in enumerate(det_feats):
+        for t_idx, trk_feat in enumerate(trk_feats):
+            cost_matrix[d_idx, t_idx] = _cosine_distance(cosi, trk_feat, det_feat)
+    return cost_matrix
 
 
 def iou_batch(bboxes1, bboxes2):
@@ -201,64 +216,15 @@ def linear_assignment(cost_matrix):
     return np.array(list(zip(x, y)))
 
 
-def associate_detections_to_trackers(detections, trackers, iou_threshold=0.3):
-    """
-    Assigns detections to tracked object (both represented as bounding boxes)
-    Returns 3 lists of matches, unmatched_detections and unmatched_trackers
-    """
-    if len(trackers) == 0:
-        return (
-            np.empty((0, 2), dtype=int),
-            np.arange(len(detections)),
-            np.empty((0, 6), dtype=int),
-        )
-
-    iou_matrix = iou_batch(detections, trackers)
-
-    if min(iou_matrix.shape) > 0:
-        a = (iou_matrix > iou_threshold).astype(np.int32)
-        if a.sum(1).max() == 1 and a.sum(0).max() == 1:
-            matched_indices = np.stack(np.where(a), axis=1)
-        else:
-            matched_indices = linear_assignment(-iou_matrix)
-    else:
-        matched_indices = np.empty(shape=(0, 2))
-
-    unmatched_detections = []
-    for d, det in enumerate(detections):
-        if d not in matched_indices[:, 0]:
-            unmatched_detections.append(d)
-    unmatched_trackers = []
-    for t, trk in enumerate(trackers):
-        if t not in matched_indices[:, 1]:
-            unmatched_trackers.append(t)
-
-    # filter out matched with low IOU
-    matches = []
-    for m in matched_indices:
-        if iou_matrix[m[0], m[1]] < iou_threshold:
-            unmatched_detections.append(m[0])
-            unmatched_trackers.append(m[1])
-        else:
-            matches.append(m.reshape(1, 2))
-    if len(matches) == 0:
-        matches = np.empty((0, 2), dtype=int)
-    else:
-        matches = np.concatenate(matches, axis=0)
-
-    return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
-
-
 def associate(
-    detections, trackers, iou_threshold, velocities, previous_obs, vdc_weight
+    detections, trackers, iou_threshold, velocities, previous_obs, vdc_weight, length
 ):
     if len(trackers) == 0:
         return (
             np.empty((0, 2), dtype=int),
             np.arange(len(detections)),
-            np.empty((0, 6), dtype=int),
+            np.empty((0, length), dtype=int),
         )
-
     Y, X = speed_direction_batch(detections, previous_obs)
     inertia_Y, inertia_X = velocities[:, 0], velocities[:, 1]
     inertia_Y = np.repeat(inertia_Y[:, np.newaxis], Y.shape[1], axis=1)
@@ -271,7 +237,9 @@ def associate(
     valid_mask = np.ones(previous_obs.shape[0])
     valid_mask[np.where(previous_obs[:, 4] < 0)] = 0
 
+    cos_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
     iou_matrix = iou_batch(detections, trackers)
+    cost_matrix = np.multiply(iou_matrix, cos_matrix)
     scores = np.repeat(detections[:, -1][:, np.newaxis], trackers.shape[0], axis=1)
     # iou_matrix = iou_matrix * scores # a trick sometiems works, we don't encourage this
     valid_mask = np.repeat(valid_mask[:, np.newaxis], X.shape[1], axis=1)
@@ -280,12 +248,12 @@ def associate(
     angle_diff_cost = angle_diff_cost.T
     angle_diff_cost = angle_diff_cost * scores
 
-    if min(iou_matrix.shape) > 0:
-        a = (iou_matrix > iou_threshold).astype(np.int32)
+    if min(cost_matrix.shape) > 0:
+        a = (cost_matrix > iou_threshold).astype(np.int32)
         if a.sum(1).max() == 1 and a.sum(0).max() == 1:
             matched_indices = np.stack(np.where(a), axis=1)
         else:
-            matched_indices = linear_assignment(-(iou_matrix + angle_diff_cost))
+            matched_indices = linear_assignment(-(cost_matrix + angle_diff_cost))
     else:
         matched_indices = np.empty(shape=(0, 2))
 
@@ -301,7 +269,7 @@ def associate(
     # filter out matched with low IOU
     matches = []
     for m in matched_indices:
-        if iou_matrix[m[0], m[1]] < iou_threshold:
+        if cost_matrix[m[0], m[1]] < iou_threshold:
             unmatched_detections.append(m[0])
             unmatched_trackers.append(m[1])
         else:

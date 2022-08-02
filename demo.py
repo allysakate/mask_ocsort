@@ -231,7 +231,17 @@ def plot_tracking(
 def ocsort(
     _tracker, frame_id, feat_masks, boxes, scores, classes, results, thing_classes
 ):
-    targets = _tracker.update(feat_masks, boxes, scores, classes)
+    detections = []
+    for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
+        det = np.insert(box, 4, score)
+        det = np.insert(det, 5, label)
+        # feat = np.array(feat).flatten()
+        feat = np.array(feat)
+        shape = min(feat.shape)
+        feat = np.resize(feat, (shape, shape)).flatten()
+        det = np.asarray(np.insert(det, 6, feat))
+        detections.append(det)
+    targets = _tracker.update(np.asarray(detections))
     track_tlwhs = []
     track_ids = []
     track_classes = []

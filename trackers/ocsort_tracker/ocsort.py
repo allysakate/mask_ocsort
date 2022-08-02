@@ -15,9 +15,9 @@ from .association import (
 )
 
 
-def k_previous_obs(observations, cur_age, k):
+def k_previous_obs(observations, cur_age, k, length):
     if len(observations) == 0:
-        return [-1, -1, -1, -1, -1, -1]
+        return [-1] * length
     for i in range(k):
         dt = k - i
         if cur_age - dt in observations:
@@ -73,7 +73,7 @@ class KalmanBoxTracker(object):
 
     count = 0
 
-    def __init__(self, bbox, delta_t=3, orig=False):
+    def __init__(self, bbox, delta_t=3, length=6, orig=False):
         """
         Initialises a tracker using initial bounding box.
 
@@ -124,12 +124,13 @@ class KalmanBoxTracker(object):
         self.hit_streak = 0
         self.age = 0
         self.category = -1
+        self.feature = np.array([0.01] * (length - 6))
         """
         NOTE: [-1,-1,-1,-1,-1] is a compromising placeholder for non-observation status, the same for the return of
         function k_previous_obs. It is ugly and I do not like it. But to support generate observation array in a
         fast and unified way, which you would see below k_observations = np.array([k_previous_obs(...]]), let's bear it for now.
         """
-        self.last_observation = np.array([-1, -1, -1, -1, -1, -1])  # placeholder
+        self.last_observation = np.array([-1] * length)  # placeholder
         self.observations = dict()
         self.history_observations = []
         self.velocity = None
@@ -140,7 +141,7 @@ class KalmanBoxTracker(object):
         Updates the state vector with observed bbox.
         """
         if bbox is not None:
-            if self.last_observation.sum() >= 0:  # no previous observation
+            if self.last_observation[:6].sum() >= 0:  # no previous observation
                 previous_box = None
                 for i in range(self.delta_t):
                     dt = self.delta_t - i
@@ -163,6 +164,7 @@ class KalmanBoxTracker(object):
             self.observations[self.age] = bbox
             self.history_observations.append(bbox)
             self.category = bbox[5]
+            self.feature = bbox[6:]
 
             if len(self.history_observations) > 2:
                 if self.history_observations[-2][4] > bbox[4]:
@@ -238,7 +240,7 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, feat_masks, bboxes, scores, classes):
+    def update(self, dets):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score,class],[x1,y1,x2,y2,score,class],...]
@@ -247,15 +249,17 @@ class OCSort(object):
         Returns the a similar array, where the last column is the object ID.
         NOTE: The number of objects returned may differ from the number of detections provided.
         """
-        dets = np.concatenate((bboxes, np.expand_dims(scores, axis=-1)), axis=1)
-        dets = np.concatenate((dets, np.expand_dims(classes, axis=-1)), axis=1)
+        length = dets.shape[1]
         # get predicted locations from existing trackers.
-        trks = np.zeros((len(self.trackers), 6))
+        trks = np.zeros((len(self.trackers), length))
         to_del = []
         ret = []
         for t, trk in enumerate(trks):
             pos = self.trackers[t].predict()[0]
-            trk[:] = [pos[0], pos[1], pos[2], pos[3], 0, 0]
+            pos_holder = [0] * length
+            pos_holder[:4] = [pos[0], pos[1], pos[2], pos[3]]
+            pos_holder[6:] = self.trackers[t].feature
+            trk[:] = pos_holder
             if np.any(np.isnan(pos)):
                 to_del.append(t)
         trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
@@ -271,7 +275,7 @@ class OCSort(object):
         last_boxes = np.array([trk.last_observation for trk in self.trackers])
         k_observations = np.array(
             [
-                k_previous_obs(trk.observations, trk.age, self.delta_t)
+                k_previous_obs(trk.observations, trk.age, self.delta_t, length)
                 for trk in self.trackers
             ]
         )
@@ -280,7 +284,13 @@ class OCSort(object):
             First round of association
         """
         matched, unmatched_dets, unmatched_trks = associate(
-            dets, trks, self.iou_threshold, velocities, k_observations, self.inertia
+            dets,
+            trks,
+            self.iou_threshold,
+            velocities,
+            k_observations,
+            self.inertia,
+            length,
         )
         for m in matched:
             self.trackers[m[1]].update(dets[m[0], :])
@@ -318,11 +328,11 @@ class OCSort(object):
 
         # create and initialise new trackers for unmatched detections
         for i in unmatched_dets:
-            trk = KalmanBoxTracker(dets[i, :], delta_t=self.delta_t)
+            trk = KalmanBoxTracker(dets[i, :], delta_t=self.delta_t, length=length)
             self.trackers.append(trk)
         i = len(self.trackers)
         for trk in reversed(self.trackers):
-            if trk.last_observation.sum() < 0:
+            if trk.last_observation[:6].sum() < 0:
                 d = trk.get_state()[0]
             else:
                 """
@@ -342,4 +352,4 @@ class OCSort(object):
                 self.trackers.pop(i)
         if len(ret) > 0:
             return np.concatenate(ret)
-        return np.empty((0, 6))
+        return np.empty((0, length))

@@ -6,7 +6,6 @@ from .association import (
     ct_dist,
     speed_direction_batch,
     linear_assignment,
-    associate_detections_to_trackers,
     associate,
 )
 from .kalmanfilter import (
