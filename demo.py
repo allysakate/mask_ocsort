@@ -21,16 +21,37 @@ WINDOW_NAME = "solov2 deep ocsort"
 CONFIG_FILE = "configs/SOLOv2/R50_3x.yaml"
 OPTS = ["MODEL.WEIGHTS", "SOLOv2_R50_3x.pth"]
 CONFIDENCE_THRESHOLD = 0.5
-VIDEO_INPUT = "/home/catchall/Videos/projects/ch01_20181212105607_6000_10.mp4"
-VIS_FOLDER = "/home/catchall/Videos/projects/test_solov2_ocsort_modified"
-IS_SAVE_RESULT = False
+USE_OCSORT = True
+WITH_FEATURE = True
+FPS = 25
+FRAME_USE = 1
+
+# {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
+ROI = [885.80, 0.00, 1918.25, 243.53]  # 1
+# ROI = [883.99, 1.65, 1918.08, 241.23] #2
+IOP_THRESHOLD = 0.1
+MOD = int(FPS / FRAME_USE)
+
+if USE_OCSORT:
+    if WITH_FEATURE:
+        tracker_name = "DeepOCSORT"
+    else:
+        tracker_name = "OCSORT"
+else:
+    tracker_name = "DeepSORT"
+VID_NAME = "ch08af_20190804170000-1"
+VID_EXT = "mp4"
+VIDEO_INPUT = f"/media/catchall/starplan/Dissertation/Evaluation/data/{VID_NAME}/videos/{VID_NAME}.{VID_EXT}"
+VIS_FOLDER = f"/media/catchall/starplan/Dissertation/Tracking/Test/{VID_NAME}/{tracker_name}_FPS{FRAME_USE}"
+TEXT_FILENAME = "APMC-CAM08-01"  # for TrackEval
+
+IS_SAVE_RESULT = True
 MODEL_DEVICE = "cuda:0"  # cpu
-CLASS_LIST = [0, 1, 2, 3, 5, 7]
+CLASS_LIST = [1, 2, 3]
 # VIDEO_OUTPUT = "/home/allysakate/Videos/ffmpeg_capture_6-000_OUT.mp4"
 VIDEO_OUTPUT = None
 TRACK_THRESH = 0.3
 IOU_THRESH = 0.3
-USE_OCSORT = True
 CPU_DEVICE = torch.device("cpu")
 _ASPECT_RATIO_THRESH = 1.6
 _MIN_BOX_AREA_THRESH = 10
@@ -57,7 +78,33 @@ def setup_config():
     return configuration
 
 
-def post_process(frame, predictions):
+def get_IOP(bbox):
+    """
+    Get intersection over prediction bbox and rois
+    Args:
+        bbox (List[int]): x- & y- coordinates
+            [xmin, ymin, xmax, ymax]
+
+    Returns:
+        Tuple(float): x- & y- coordinates of centroids
+    """
+
+    # determine the (x, y)-coordinates of the intersection rectangle
+    xA = max(ROI[0], bbox[0])
+    yA = max(ROI[1], bbox[1])
+    xB = min(ROI[2], bbox[2])
+    yB = min(ROI[3], bbox[3])
+
+    # compute the area of the prediction rectangle
+    bboxArea = (bbox[2] - bbox[0] + 1) * (bbox[3] - bbox[1] + 1)
+
+    # compute the area of intersection rectangle
+    interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
+
+    return interArea / bboxArea
+
+
+def post_process(metadata, predictions):
     """
     Filter predictions
 
@@ -151,7 +198,7 @@ def post_process(frame, predictions):
             )
             scores = scores[sorted_idxs]
             seg_masks = seg_masks[sorted_idxs, :, :]
-            feat_masks = feat_masks[sorted_idxs, :, :]
+            feat_masks = feat_masks[sorted_idxs]
             if seg_masks is not None:
                 frame_boxes = masks_to_boxes(seg_masks)
 
@@ -181,15 +228,15 @@ def plot_tracking(
     line_thickness = 3
 
     # radius = max(5, int(im_w / 140.0))
-    cv2.putText(
-        im,
-        "frame: %d fps: %.2f num: %d" % (frame_id, fps, len(tlwhs)),
-        (0, int(15 * text_scale)),
-        cv2.FONT_HERSHEY_PLAIN,
-        2,
-        (0, 0, 255),
-        thickness=2,
-    )
+    # cv2.putText(
+    #     im,
+    #     "frame: %d fps: %.2f num: %d" % (frame_id, fps, len(tlwhs)),
+    #     (0, int(15 * text_scale)),
+    #     cv2.FONT_HERSHEY_PLAIN,
+    #     2,
+    #     (0, 0, 255),
+    #     thickness=2,
+    # )
 
     for i, tlwh in enumerate(tlwhs):
         if classes:
@@ -228,20 +275,36 @@ def plot_tracking(
     return im
 
 
+def filter_box(box, frame=None):
+    is_included = False
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    roi_iop = get_IOP(box)
+    if roi_iop < IOP_THRESHOLD and area > 5900:
+        is_included = True
+        if frame is not None:
+            intbox = tuple(map(int, box))
+            cv2.rectangle(
+                frame, intbox[0:2], intbox[2:4], color=(0, 0, 255), thickness=1
+            )
+    return is_included, frame
+
+
 def ocsort(
     _tracker, frame_id, feat_masks, boxes, scores, classes, results, thing_classes
 ):
     detections = []
     for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-        det = np.insert(box, 4, score)
-        det = np.insert(det, 5, label)
-        # feat = np.array(feat).flatten()
-        feat = np.array(feat)
-        shape = min(feat.shape)
-        feat = np.resize(feat, (shape, shape)).flatten()
-        det = np.asarray(np.insert(det, 6, feat))
-        detections.append(det)
-    targets = _tracker.update(np.asarray(detections))
+        is_included, _ = filter_box(box)
+        if is_included:
+            det = np.insert(box, 4, score)
+            det = np.insert(det, 5, label)
+            feat = np.array(feat).flatten()
+            # feat = np.array(feat)
+            # shape = min(feat.shape)
+            # feat = np.resize(feat, (shape, shape)).flatten()
+            det = np.asarray(np.insert(det, 6, feat))
+            detections.append(det)
+    targets = _tracker.update(np.asarray(detections), WITH_FEATURE)
     track_tlwhs = []
     track_ids = []
     track_classes = []
@@ -275,11 +338,15 @@ def deepsort(
 ):
     detections = []
     for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-        feat = np.array(feat)
-        shape = min(feat.shape)
-        feature = np.resize(feat, (shape, shape)).flatten()
-        det = detection.Detection(np.array(box), score, thing_classes[label], feature)
-        detections.append(det)
+        is_included, _ = filter_box(box)
+        if is_included:
+            feat = np.array(feat)
+            shape = min(feat.shape)
+            feature = np.resize(feat, (shape, shape)).flatten()
+            det = detection.Detection(
+                np.array(box), score, thing_classes[label], feature
+            )
+            detections.append(det)
     _tracker.predict()
     _tracker.update(detections)
     track_tlwhs = []
@@ -333,7 +400,7 @@ def main(cfg, predictor, metadata):
     results = []
 
     while True:
-        if frame_id % 20 == 0:
+        if frame_id % FPS == 0:
             logger.info(
                 "Processing frame {} ({:.2f} fps)".format(
                     frame_id, 1.0 / max(1e-5, timer.average_time)
@@ -343,44 +410,47 @@ def main(cfg, predictor, metadata):
         if ret_val:
             raw_img = frame
             timer.tic()
-            predictions = predictor(frame)
-            predictions = predictions["instances"].to(CPU_DEVICE)
-            feat_masks, boxes, scores, classes = post_process(frame, predictions)
-            if boxes.any():
-                # TODO: tracking
-                if not USE_OCSORT:
-                    track_tlwhs, track_ids, track_classes, results = deepsort(
-                        _tracker,
-                        frame_id,
-                        feat_masks,
-                        boxes,
-                        scores,
-                        classes,
-                        results,
-                        thing_classes,
+            if int(frame_id % MOD) == 0 and frame_id != 0:
+                predictions = predictor(frame)
+                predictions = predictions["instances"].to(CPU_DEVICE)
+                feat_masks, boxes, scores, classes = post_process(metadata, predictions)
+                if boxes.any():
+                    # TODO: tracking
+                    if not USE_OCSORT:
+                        track_tlwhs, track_ids, track_classes, results = deepsort(
+                            _tracker,
+                            frame_id,
+                            feat_masks,
+                            boxes,
+                            scores,
+                            classes,
+                            results,
+                            thing_classes,
+                        )
+                    else:
+                        track_tlwhs, track_ids, track_classes, results = ocsort(
+                            _tracker,
+                            frame_id,
+                            feat_masks,
+                            boxes,
+                            scores,
+                            classes,
+                            results,
+                            thing_classes,
+                        )
+                    timer.toc()
+                    res_image = plot_tracking(
+                        raw_img,
+                        track_tlwhs,
+                        track_ids,
+                        track_classes,
+                        frame_id=frame_id + 1,
+                        fps=1.0 / timer.average_time,
                     )
-                else:
-                    track_tlwhs, track_ids, track_classes, results = ocsort(
-                        _tracker,
-                        frame_id,
-                        feat_masks,
-                        boxes,
-                        scores,
-                        classes,
-                        results,
-                        thing_classes,
-                    )
-                timer.toc()
-                res_image = plot_tracking(
-                    raw_img,
-                    track_tlwhs,
-                    track_ids,
-                    track_classes,
-                    frame_id=frame_id + 1,
-                    fps=1.0 / timer.average_time,
-                )
-                res_path = os.path.join(VIS_FOLDER, f"{frame_id}.jpg")
-                cv2.imwrite(res_path, res_image)
+                    res_path = os.path.join(save_folder, f"{frame_id}.jpg")
+                    for box in boxes:
+                        _, res_image = filter_box(box, res_image)
+                    cv2.imwrite(res_path, res_image)
             else:
                 timer.toc()
                 res_image = raw_img
@@ -394,7 +464,7 @@ def main(cfg, predictor, metadata):
         frame_id += 1
 
     if IS_SAVE_RESULT:
-        res_file = os.path.join(VIS_FOLDER, f"{timestamp}.txt")
+        res_file = os.path.join(save_folder, f"{TEXT_FILENAME}.txt")
         with open(res_file, "w") as f:
             f.writelines(results)
         logger.info(f"save results to {res_file}")

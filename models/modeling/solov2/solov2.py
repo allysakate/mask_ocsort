@@ -447,11 +447,19 @@ class SOLOv2(nn.Module):
     @staticmethod
     def split_feats(feats):
         return (
-            F.interpolate(feats[0], scale_factor=0.5, mode="bilinear", align_corners=False, recompute_scale_factor=False),
+            F.interpolate(
+                feats[0],
+                scale_factor=0.5,
+                mode="bilinear",
+                align_corners=False,
+                recompute_scale_factor=False,
+            ),
             feats[1],
             feats[2],
             feats[3],
-            F.interpolate(feats[4], size=feats[3].shape[-2:], mode="bilinear", align_corners=False),
+            F.interpolate(
+                feats[4], size=feats[3].shape[-2:], mode="bilinear", align_corners=False
+            ),
         )
 
     def inference(
@@ -538,7 +546,8 @@ class SOLOv2(nn.Module):
         batch_size, channel = kernel_preds.shape
         kernel_preds = kernel_preds.view(batch_size, channel, 1, 1)
         seg_preds = F.conv2d(seg_preds, kernel_preds, stride=1).squeeze(0).sigmoid()
-        seg_feats = F.conv2d(seg_feats, kernel_preds, stride=1).squeeze(0).sigmoid()
+        # TODO: Features may not be enough
+        seg_feats = seg_preds
 
         # mask.
         seg_masks = seg_preds > self.mask_threshold
@@ -625,9 +634,14 @@ class SOLOv2(nn.Module):
 
         # reshape to original size.
         seg_preds = F.interpolate(
-            seg_preds.unsqueeze(0), size=upsampled_size_out, mode="bilinear", align_corners=False
+            seg_preds.unsqueeze(0),
+            size=upsampled_size_out,
+            mode="bilinear",
+            align_corners=False,
         )[:, :, :h, :w]
-        seg_masks = F.interpolate(seg_preds, size=ori_size, mode="bilinear", align_corners=False).squeeze(0)
+        seg_masks = F.interpolate(
+            seg_preds, size=ori_size, mode="bilinear", align_corners=False
+        ).squeeze(0)
         seg_masks = seg_masks > self.mask_threshold
 
         results = Instances(ori_size)
@@ -773,7 +787,9 @@ class SOLOv2InsHead(nn.Module):
             # individual feature.
             kernel_feat = ins_kernel_feat
             seg_num_grid = self.num_grids[idx]
-            kernel_feat = F.interpolate(kernel_feat, size=seg_num_grid, mode="bilinear", align_corners=False)
+            kernel_feat = F.interpolate(
+                kernel_feat, size=seg_num_grid, mode="bilinear", align_corners=False
+            )
             cate_feat = kernel_feat[:, :-2, :, :]
 
             # kernel

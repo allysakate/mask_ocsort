@@ -217,7 +217,14 @@ def linear_assignment(cost_matrix):
 
 
 def associate(
-    detections, trackers, iou_threshold, velocities, previous_obs, vdc_weight, length
+    detections,
+    trackers,
+    iou_threshold,
+    velocities,
+    previous_obs,
+    vdc_weight,
+    length,
+    with_feature=False,
 ):
     if len(trackers) == 0:
         return (
@@ -237,9 +244,12 @@ def associate(
     valid_mask = np.ones(previous_obs.shape[0])
     valid_mask[np.where(previous_obs[:, 4] < 0)] = 0
 
-    cos_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
-    iou_matrix = iou_batch(detections, trackers)
-    cost_matrix = np.multiply(iou_matrix, cos_matrix)
+    if with_feature:
+        cos_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
+        iou_matrix = iou_batch(detections, trackers)
+        cost_matrix = np.add(iou_matrix * 0.65, cos_matrix * 0.35)
+    else:
+        cost_matrix = iou_batch(detections, trackers)
     scores = np.repeat(detections[:, -1][:, np.newaxis], trackers.shape[0], axis=1)
     # iou_matrix = iou_matrix * scores # a trick sometiems works, we don't encourage this
     valid_mask = np.repeat(valid_mask[:, np.newaxis], X.shape[1], axis=1)
