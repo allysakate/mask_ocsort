@@ -19,12 +19,12 @@ from trackers.tracking_utils.timer import Timer
 # constants
 WINDOW_NAME = "solov2 deep ocsort"
 CONFIG_FILE = "configs/SOLOv2/R50_3x.yaml"
-OPTS = ["MODEL.WEIGHTS", "SOLOv2_R50_3x.pth"]
+OPTS = ["MODEL.WEIGHTS", "model_0049999_v0.pth"]
 CONFIDENCE_THRESHOLD = 0.5
 USE_OCSORT = True
 WITH_FEATURE = True
-FPS = 25
-FRAME_USE = 1
+FPS = 30
+FRAME_USE = 30
 
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 ROI = [885.80, 0.00, 1918.25, 243.53]  # 1
@@ -39,11 +39,13 @@ if USE_OCSORT:
         tracker_name = "OCSORT"
 else:
     tracker_name = "DeepSORT"
-VID_NAME = "ch08af_20190804170000-1"
-VID_EXT = "mp4"
-VIDEO_INPUT = f"/media/catchall/starplan/Dissertation/Evaluation/data/{VID_NAME}/videos/{VID_NAME}.{VID_EXT}"
+VID_NAME = "MOT17-05-DPM-raw"
+VID_EXT = "webm"
+VIDEO_INPUT = (
+    f"/media/catchall/starplan/Dissertation/Dataset/Tracking/{VID_NAME}.{VID_EXT}"
+)
 VIS_FOLDER = f"/media/catchall/starplan/Dissertation/Tracking/Test/{VID_NAME}/{tracker_name}_FPS{FRAME_USE}"
-TEXT_FILENAME = "APMC-CAM08-01"  # for TrackEval
+TEXT_FILENAME = "MOT17-05-DPM"  # for TrackEval
 
 IS_SAVE_RESULT = True
 MODEL_DEVICE = "cuda:0"  # cpu
@@ -239,10 +241,10 @@ def plot_tracking(
     # )
 
     for i, tlwh in enumerate(tlwhs):
-        if classes:
-            label = classes[i]
-        else:
-            label = None
+        # if classes:
+        #     label = classes[i]
+        # else:
+        #     label = None
         x1, y1, w, h = tlwh
         intbox = tuple(map(int, (x1, y1, x1 + w, y1 + h)))
         obj_id = int(obj_ids[i])
@@ -262,16 +264,16 @@ def plot_tracking(
             (0, 0, 255),
             thickness=text_thickness,
         )
-        if label:
-            cv2.putText(
-                im,
-                label,
-                (intbox[0], intbox[1] + 20),
-                cv2.FONT_HERSHEY_PLAIN,
-                text_scale,
-                (0, 0, 255),
-                thickness=text_thickness,
-            )
+        # if label:
+        #     cv2.putText(
+        #         im,
+        #         label,
+        #         (intbox[0], intbox[1] + 20),
+        #         cv2.FONT_HERSHEY_PLAIN,
+        #         text_scale,
+        #         (0, 0, 255),
+        #         thickness=text_thickness,
+        #     )
     return im
 
 
@@ -281,11 +283,11 @@ def filter_box(box, frame=None):
     roi_iop = get_IOP(box)
     if roi_iop < IOP_THRESHOLD and area > 5900:
         is_included = True
-        if frame is not None:
-            intbox = tuple(map(int, box))
-            cv2.rectangle(
-                frame, intbox[0:2], intbox[2:4], color=(0, 0, 255), thickness=1
-            )
+        # if frame is not None:
+        #     intbox = tuple(map(int, box))
+        #     cv2.rectangle(
+        #         frame, intbox[0:2], intbox[2:4], color=(0, 0, 255), thickness=1
+        #     )
     return is_included, frame
 
 
@@ -390,6 +392,9 @@ def main(cfg, predictor, metadata):
 
     frame_id = 0
     thing_classes = metadata.get("thing_classes", None)
+    thing_classes[0] = "car"
+    thing_classes[1] = "person"
+    thing_classes[2] = "ignore"
     if not USE_OCSORT:
         metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
         _tracker = tracker.Tracker(metric)
@@ -413,44 +418,49 @@ def main(cfg, predictor, metadata):
             if int(frame_id % MOD) == 0 and frame_id != 0:
                 predictions = predictor(frame)
                 predictions = predictions["instances"].to(CPU_DEVICE)
-                feat_masks, boxes, scores, classes = post_process(metadata, predictions)
-                if boxes.any():
-                    # TODO: tracking
-                    if not USE_OCSORT:
-                        track_tlwhs, track_ids, track_classes, results = deepsort(
-                            _tracker,
-                            frame_id,
-                            feat_masks,
-                            boxes,
-                            scores,
-                            classes,
-                            results,
-                            thing_classes,
-                        )
-                    else:
-                        track_tlwhs, track_ids, track_classes, results = ocsort(
-                            _tracker,
-                            frame_id,
-                            feat_masks,
-                            boxes,
-                            scores,
-                            classes,
-                            results,
-                            thing_classes,
-                        )
-                    timer.toc()
-                    res_image = plot_tracking(
-                        raw_img,
-                        track_tlwhs,
-                        track_ids,
-                        track_classes,
-                        frame_id=frame_id + 1,
-                        fps=1.0 / timer.average_time,
+                try:
+                    feat_masks, boxes, scores, classes = post_process(
+                        metadata, predictions
                     )
-                    res_path = os.path.join(save_folder, f"{frame_id}.jpg")
-                    for box in boxes:
-                        _, res_image = filter_box(box, res_image)
-                    cv2.imwrite(res_path, res_image)
+                    if boxes.any():
+                        # TODO: tracking
+                        if not USE_OCSORT:
+                            track_tlwhs, track_ids, track_classes, results = deepsort(
+                                _tracker,
+                                frame_id,
+                                feat_masks,
+                                boxes,
+                                scores,
+                                classes,
+                                results,
+                                thing_classes,
+                            )
+                        else:
+                            track_tlwhs, track_ids, track_classes, results = ocsort(
+                                _tracker,
+                                frame_id,
+                                feat_masks,
+                                boxes,
+                                scores,
+                                classes,
+                                results,
+                                thing_classes,
+                            )
+                        timer.toc()
+                        res_image = plot_tracking(
+                            raw_img,
+                            track_tlwhs,
+                            track_ids,
+                            track_classes,
+                            frame_id=frame_id + 1,
+                            fps=1.0 / timer.average_time,
+                        )
+                        res_path = os.path.join(save_folder, f"{frame_id}.jpg")
+                        for box in boxes:
+                            _, res_image = filter_box(box, res_image)
+                        cv2.imwrite(res_path, res_image)
+                except Exception as e:
+                    print(frame_id, e)
             else:
                 timer.toc()
                 res_image = raw_img
