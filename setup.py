@@ -28,7 +28,9 @@ def get_extensions():
     extra_compile_args = {"cxx": []}
     define_macros = []
 
-    if (torch.cuda.is_available() and CUDA_HOME is not None) or os.getenv("FORCE_CUDA", "0") == "1":
+    if (torch.cuda.is_available() and CUDA_HOME is not None) or os.getenv(
+        "FORCE_CUDA", "0"
+    ) == "1":
         extension = CUDAExtension
         sources += source_cuda
         define_macros += [("WITH_CUDA", None)]
@@ -81,7 +83,7 @@ setup(
         "rapidfuzz",
         "Polygon3",
         "shapely",
-        "editdistance"
+        "editdistance",
     ],
     extras_require={"all": ["psutil"]},
     ext_modules=get_extensions(),
