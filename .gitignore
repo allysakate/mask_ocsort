@@ -132,5 +132,12 @@ dmypy.json
 *.jpg
 *.png
 *.mp4
-*.pth
 *.webm
+
+# Models
+*.pth
+*.pkl
+*.pt
+
+# Logs
+/logs
