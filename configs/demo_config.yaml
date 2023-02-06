@@ -1,9 +1,7 @@
 tracker : DeepOCSORT
-predictor : SOLOv2
-config_file : configs/SOLOv2/R50_3x.yaml
-weight_file : checkpoints/SOLOv2_R50_3x.pth
-use_ocsort : True
-with_feature : True
+predictor : MaskRCNN
+config_file : configs/MaskRCNN/mask_rcnn_R_50_FPN_3x.yaml
+weight_file : checkpoints/MaskRCNN_R50_3x_f10217.pkl
 is_save_result : True
 frame_use : 1
 data_dir : /home/allysakate/Documents/thesis/data_preprocess/data/videos

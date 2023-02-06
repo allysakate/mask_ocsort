@@ -1,7 +1,9 @@
 import os
 import time
-
+from typing import List
+from functools import reduce
 import torch
+import torch.nn as nn
 import cv2
 import numpy as np
 from torchvision.ops import masks_to_boxes
@@ -40,6 +42,47 @@ class ParameterManager:
         self.output_dir = create_output(self.config.output_dir, f"{self.config.tracker}/data")
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self._tracker = None
+        self.use_ocsort, self.with_feature = self.set_useocsort_feat()
+
+    def set_useocsort_feat(self):
+        if self.tracker_name == "DeepOCSORT":
+            return True, True
+        elif self.tracker_name == "OCSORT":
+            return True, False
+        elif self.tracker_name == "DeepSORT":
+            return False, True
+
+class LayerHook:
+    """Taps into the intermediate layer of a CNN Model"""
+
+    def __init__(self):
+        self.outputs = []
+        self.inputs = []
+        self.hookList = []
+
+    def hook(self, module, input, output):
+        self.inputs.append(input)
+        self.outputs.append(output)
+
+    def node2module(self, network: torch.nn.Module, node: str) -> nn.Module:
+        module_list = node.split(".")
+        module = network
+        if module_list:
+            module = reduce(getattr, [module, *module_list])
+
+        return module
+
+    def register(self, network: nn.Module, nodes: List) -> None:
+        for node in nodes:
+            module = self.node2module(network, node)
+            hook = module.register_forward_hook(self.hook)
+            self.hookList.append(hook)
+
+    def remove(self) -> None:
+        """Removes the hook registrations.
+        Useful for re-inserting new hooks
+        """
+        [hook.remove() for hook in self.hookList]
 
 
 class VideoProcessor:
@@ -69,6 +112,7 @@ class VideoProcessor:
         self.metadata = MetadataCatalog.get(
             cfg.DATASETS.TEST[0] if len(cfg.DATASETS.TEST) else "__unused"
         )
+        self.hooker = self.set_hooker()
 
     @property
     def frame_skip(self):
@@ -95,12 +139,13 @@ class VideoProcessor:
         configuration.MODEL.ROI_HEADS.SCORE_THRESH_TEST = (
             self.param.config.confidence_threshold
         )
-        configuration.MODEL.FCOS.INFERENCE_TH_TEST = (
-            self.param.config.confidence_threshold
-        )
-        configuration.MODEL.MEInst.INFERENCE_TH_TEST = (
-            self.param.config.confidence_threshold
-        )
+        if self.param.config.predictor.upper() == "SOLOV2":
+            configuration.MODEL.FCOS.INFERENCE_TH_TEST = (
+                self.param.config.confidence_threshold
+            )
+            configuration.MODEL.MEInst.INFERENCE_TH_TEST = (
+                self.param.config.confidence_threshold
+            )
         # configuration.MODEL.SOLOV2.SCORE_THR = self.param.config.confidence_threshold
         configuration.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH = (
             self.param.config.confidence_threshold
@@ -108,7 +153,14 @@ class VideoProcessor:
         configuration.freeze()
         return configuration
 
-    def post_process(self, predictions):
+    def set_hooker(self):
+        hooker = LayerHook()
+        nodes = ["roi_heads.mask_pooler"]
+        hooker.register(self.predictor.model, nodes)
+        return hooker
+
+
+    def post_process(self, predictions, mask_pool=None):
         """Filter predictions
         Args:
             predictions (Instances): the output of an instance detection/segmentation
@@ -139,6 +191,8 @@ class VideoProcessor:
         boxes = boxes[filter_mask]
         classes = classes[filter_mask]
         scores = scores[filter_mask]
+        if mask_pool.any():
+            mask_pool = mask_pool[filter_mask]
 
         if scores.any():
 
@@ -162,14 +216,15 @@ class VideoProcessor:
             pred_masks = None if pred_masks is None else pred_masks[visibilities]
             seg_masks = pred_masks
 
-            if predictions.has("feat_masks"):
-                feat_masks = predictions.feat_masks
-                feat_masks = feat_masks[filter_mask]
-
+            if mask_pool.any():
+                feat_masks = mask_pool
             else:
-                feat_masks = None
-
-            feat_masks = None if feat_masks is None else feat_masks[visibilities]
+                if predictions.has("feat_masks"):
+                    feat_masks = predictions.feat_masks
+                    feat_masks = feat_masks[filter_mask]
+                else:
+                    feat_masks = None
+                feat_masks = None if feat_masks is None else feat_masks[visibilities]
 
             # labels = _create_text_labels(
             #     classes, scores, metadata.get("thing_classes", None)
@@ -325,9 +380,7 @@ class VideoProcessor:
                 # feat = np.resize(feat, (shape, shape)).flatten()
                 det = np.asarray(np.insert(det, 6, feat))
                 detections.append(det)
-        targets = self._tracker.update(
-            np.asarray(detections), self.param.config.with_feature
-        )
+        targets = self._tracker.update(np.asarray(detections), self.param.with_feature)
         track_tlwhs = []
         track_ids = []
         track_classes = []
@@ -421,7 +474,7 @@ class VideoProcessor:
         # thing_classes[0] = "car"
         # thing_classes[1] = "person"
         # thing_classes[2] = "ignore"
-        if not self.param.config.use_ocsort:
+        if not self.param.use_ocsort:
             metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
             self._tracker = tracker.Tracker(metric)
         else:
@@ -509,7 +562,7 @@ class VideoProcessor:
 
         if self.param.config.is_save_result:
             res_file = os.path.join(
-                self.param.output_dir, f"{self.param.config.text_filename}.txt"
+                self.param.output_dir, f"{self.param.config.text_filename.upper()}.txt"
             )
             with open(res_file, "w") as f:
                 f.writelines(results)
