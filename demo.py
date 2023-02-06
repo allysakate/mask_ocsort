@@ -36,21 +36,10 @@ class ParameterManager:
 
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
-        self.output_dir = create_output(self.config.output_dir)
+        self.tracker_name = self.config.tracker
+        self.output_dir = create_output(self.config.output_dir, f"{self.config.tracker}/data")
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self._tracker = None
-
-    @property
-    def tracker_name(self):
-        """Sets Tracker name"""
-        if self.config.use_ocsort:
-            if self.config.with_feature:
-                tracker_name = "DeepOCSORT"
-            else:
-                tracker_name = "OCSORT"
-        else:
-            tracker_name = "DeepSORT"
-        return tracker_name
 
 
 class VideoProcessor:
@@ -307,8 +296,12 @@ class VideoProcessor:
         """
         is_included = False
         area = (box[2] - box[0]) * (box[3] - box[1])
-        roi_iop = get_IOP(self.param.config.roi, box)
-        if roi_iop < self.param.config.iop_threshold and area > 5900:
+        if self.param.config.roi:
+            roi_iop = get_IOP(self.param.config.roi, box)
+            condition = roi_iop < self.param.config.iop_threshold and area > 5900
+        else:
+            condition = True
+        if condition:
             is_included = True
             # if frame is not None:
             #     intbox = tuple(map(int, box))
@@ -409,9 +402,9 @@ class VideoProcessor:
         height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
         # num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
         basename = os.path.basename(self.video_file)
-        current_time = time.localtime()
-        timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-        save_folder = os.path.join(self.param.output_dir, timestamp)
+        # current_time = time.localtime()
+        # timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+        save_folder = os.path.join(self.param.output_dir, "images")
         os.makedirs(save_folder, exist_ok=True)
         if self.param.config.is_save_result:
             save_path = os.path.join(save_folder, basename)
@@ -516,7 +509,7 @@ class VideoProcessor:
 
         if self.param.config.is_save_result:
             res_file = os.path.join(
-                save_folder, f"{self.param.config.text_filename}.txt"
+                self.param.output_dir, f"{self.param.config.text_filename}.txt"
             )
             with open(res_file, "w") as f:
                 f.writelines(results)

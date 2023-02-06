@@ -1,3 +1,4 @@
+tracker : DeepOCSORT
 predictor : SOLOv2
 config_file : configs/SOLOv2/R50_3x.yaml
 weight_file : checkpoints/SOLOv2_R50_3x.pth
@@ -5,15 +6,16 @@ use_ocsort : True
 with_feature : True
 is_save_result : True
 frame_use : 1
-data_dir : /home/catchall/Videos
-vid_name : taft_ch01_20191207103510
+data_dir : /home/allysakate/Documents/thesis/data_preprocess/data/videos
+vid_name : ch01_20190813145955
 vid_ext : mp4
-text_filename : taft_ch01_20191207103510  # for TrackEval
-output_dir : /home/catchall/Pictures/SOLOv2_R50_3x
+output_dir : /home/allysakate/Documents/thesis/TrackEval/data/trackers/mot_challenge/CATaft-test
+text_filename : SOLOV2_FPS1_CH01  # for TrackEval
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 class_list : [1, 2, 3, 5, 7]
-roi : [885.80, 0.00, 1918.25, 243.53]  # 1
-# ROI : [883.99, 1.65, 1918.08, 241.23] #2
+roi : 
+# roi : [885.80, 0.00, 1918.25, 243.53]  # 1
+# roi : [883.99, 1.65, 1918.08, 241.23] #2
 confidence_threshold : 0.5
 iop_threshold : 0.1
 track_thresh : 0.3
