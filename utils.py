@@ -1,7 +1,6 @@
 import os
 import yaml
 import logging
-import shutil
 from datetime import datetime
 
 
@@ -157,9 +156,8 @@ def create_output(dir_path: str, base_name: str = None):
         output_dir = os.path.join(dir_path, base_name)
     else:
         output_dir = dir_path
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-    os.makedirs(output_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     return output_dir
 
 

@@ -1,5 +1,4 @@
 import os
-import time
 from typing import List
 from functools import reduce
 import torch
@@ -15,6 +14,7 @@ from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
 from utils import initiate_logging, get_config, create_output, get_IOP
+from progress_bar import ProgressBar
 
 
 class ParameterManager:
@@ -39,7 +39,9 @@ class ParameterManager:
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
         self.tracker_name = self.config.tracker
-        self.output_dir = create_output(self.config.output_dir, f"{self.config.tracker}/data")
+        self.output_dir = create_output(
+            self.config.output_dir, f"{self.config.tracker}/data"
+        )
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self._tracker = None
         self.use_ocsort, self.with_feature = self.set_useocsort_feat()
@@ -51,6 +53,7 @@ class ParameterManager:
             return True, False
         elif self.tracker_name == "DeepSORT":
             return False, True
+
 
 class LayerHook:
     """Taps into the intermediate layer of a CNN Model"""
@@ -100,11 +103,7 @@ class VideoProcessor:
 
     def __init__(self):
         self.param = ParameterManager("configs/demo_config.yaml")
-        self.video_file = os.path.join(
-            self.param.config.data_dir,
-            f"{self.param.config.vid_name}.{self.param.config.vid_ext}",
-        )
-        self.video = cv2.VideoCapture(self.video_file)
+        self.video = cv2.VideoCapture(self.param.config.video_path)
         self.fps = self.video.get(cv2.CAP_PROP_FPS)
         self.logger = initiate_logging(self.param.config.predictor)
         cfg = self.setup_config()
@@ -112,7 +111,6 @@ class VideoProcessor:
         self.metadata = MetadataCatalog.get(
             cfg.DATASETS.TEST[0] if len(cfg.DATASETS.TEST) else "__unused"
         )
-        self.hooker = self.set_hooker()
 
     @property
     def frame_skip(self):
@@ -154,11 +152,12 @@ class VideoProcessor:
         return configuration
 
     def set_hooker(self):
-        hooker = LayerHook()
-        nodes = ["roi_heads.mask_pooler"]
-        hooker.register(self.predictor.model, nodes)
+        if self.param.config.predictor.upper() == "MASKRCNN":
+            hooker = LayerHook()
+            hooker.register(self.predictor.model, ["roi_heads.mask_pooler"])
+        else:
+            hooker = None
         return hooker
-
 
     def post_process(self, predictions, mask_pool=None):
         """Filter predictions
@@ -191,7 +190,7 @@ class VideoProcessor:
         boxes = boxes[filter_mask]
         classes = classes[filter_mask]
         scores = scores[filter_mask]
-        if mask_pool.any():
+        if mask_pool is not None:
             mask_pool = mask_pool[filter_mask]
 
         if scores.any():
@@ -216,15 +215,15 @@ class VideoProcessor:
             pred_masks = None if pred_masks is None else pred_masks[visibilities]
             seg_masks = pred_masks
 
-            if mask_pool.any():
-                feat_masks = mask_pool
-            else:
+            if mask_pool is None:
                 if predictions.has("feat_masks"):
                     feat_masks = predictions.feat_masks
                     feat_masks = feat_masks[filter_mask]
                 else:
                     feat_masks = None
                 feat_masks = None if feat_masks is None else feat_masks[visibilities]
+            else:
+                feat_masks = mask_pool
 
             # labels = _create_text_labels(
             #     classes, scores, metadata.get("thing_classes", None)
@@ -258,7 +257,10 @@ class VideoProcessor:
                 )
                 scores = scores[sorted_idxs]
                 seg_masks = seg_masks[sorted_idxs, :, :]
-                feat_masks = feat_masks[sorted_idxs]
+                if feat_masks is not None:
+                    feat_masks = feat_masks[sorted_idxs]
+                else:
+                    feat_masks = np.empty(len(scores))
                 if seg_masks is not None:
                     frame_boxes = masks_to_boxes(seg_masks)
 
@@ -454,10 +456,11 @@ class VideoProcessor:
         width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
         # num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-        basename = os.path.basename(self.video_file)
+        basename, _ = os.path.splitext(os.path.basename(self.param.config.video_path))
         # current_time = time.localtime()
         # timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-        save_folder = os.path.join(self.param.output_dir, "images")
+        output_name = self.param.config.text_filename.upper()
+        save_folder = os.path.join(self.param.output_dir, output_name)
         os.makedirs(save_folder, exist_ok=True)
         if self.param.config.is_save_result:
             save_path = os.path.join(save_folder, basename)
@@ -483,6 +486,8 @@ class VideoProcessor:
         frame_id = 0
         results = []
 
+        frame_count = self.video.get(cv2.CAP_PROP_FRAME_COUNT)
+        prog_bar = ProgressBar(int(frame_count), fmt=ProgressBar.FULL)
         while True:
             if frame_id % self.fps == 0:
                 self.logger.info(
@@ -495,59 +500,65 @@ class VideoProcessor:
                 raw_img = frame
                 timer.tic()
                 if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
+                    hooker = self.set_hooker()
                     predictions = self.predictor(frame)
                     predictions = predictions["instances"].to(torch.device("cpu"))
-                    try:
-                        feat_masks, boxes, scores, classes = self.post_process(
-                            predictions
-                        )
-                        if boxes.any():
-                            # TODO: tracking
-                            if not self.param.config.use_ocsort:
-                                (
-                                    track_tlwhs,
-                                    track_ids,
-                                    track_classes,
-                                    results,
-                                ) = self.deepsort(
-                                    frame_id,
-                                    feat_masks,
-                                    boxes,
-                                    scores,
-                                    classes,
-                                    results,
-                                    thing_classes,
-                                )
-                            else:
-                                (
-                                    track_tlwhs,
-                                    track_ids,
-                                    track_classes,
-                                    results,
-                                ) = self.ocsort(
-                                    frame_id,
-                                    feat_masks,
-                                    boxes,
-                                    scores,
-                                    classes,
-                                    results,
-                                    thing_classes,
-                                )
-                            timer.toc()
-                            res_image = self.plot_tracking(
-                                raw_img,
+                    if hooker:
+                        mask_pool = hooker.outputs[-1].cpu().numpy()
+                        hooker.remove()
+                    else:
+                        mask_pool = None
+                    # try:
+                    feat_masks, boxes, scores, classes = self.post_process(
+                        predictions, mask_pool
+                    )
+                    if boxes.any():
+                        # TODO: tracking
+                        if not self.param.use_ocsort:
+                            (
                                 track_tlwhs,
                                 track_ids,
                                 track_classes,
-                                frame_id=frame_id + 1,
-                                fps=1.0 / timer.average_time,
+                                results,
+                            ) = self.deepsort(
+                                frame_id,
+                                feat_masks,
+                                boxes,
+                                scores,
+                                classes,
+                                results,
+                                thing_classes,
                             )
-                            res_path = os.path.join(save_folder, f"{frame_id}.jpg")
-                            for box in boxes:
-                                _, res_image = self.filter_box(box, res_image)
-                            cv2.imwrite(res_path, res_image)
-                    except Exception as e:
-                        print(frame_id, e)
+                        else:
+                            (
+                                track_tlwhs,
+                                track_ids,
+                                track_classes,
+                                results,
+                            ) = self.ocsort(
+                                frame_id,
+                                feat_masks,
+                                boxes,
+                                scores,
+                                classes,
+                                results,
+                                thing_classes,
+                            )
+                        timer.toc()
+                        res_image = self.plot_tracking(
+                            raw_img,
+                            track_tlwhs,
+                            track_ids,
+                            track_classes,
+                            frame_id=frame_id + 1,
+                            fps=1.0 / timer.average_time,
+                        )
+                        res_path = os.path.join(save_folder, f"{frame_id}.jpg")
+                        for box in boxes:
+                            _, res_image = self.filter_box(box, res_image)
+                        cv2.imwrite(res_path, res_image)
+                    # except Exception as e:
+                    #     print(frame_id, e)
                 else:
                     timer.toc()
                     res_image = raw_img
@@ -559,11 +570,12 @@ class VideoProcessor:
             else:
                 break
             frame_id += 1
-
+            # Update progress bar
+            prog_bar.current += 1
+            prog_bar()
+        prog_bar.done()
         if self.param.config.is_save_result:
-            res_file = os.path.join(
-                self.param.output_dir, f"{self.param.config.text_filename.upper()}.txt"
-            )
+            res_file = os.path.join(self.param.output_dir, f"{output_name}.txt")
             with open(res_file, "w") as f:
                 f.writelines(results)
             self.logger.info(f"save results to {res_file}")
