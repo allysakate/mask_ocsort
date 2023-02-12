@@ -14,7 +14,6 @@ from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
 from utils import initiate_logging, get_config, create_output, get_IOP
-from progress_bar import ProgressBar
 
 
 class ParameterManager:
@@ -38,21 +37,34 @@ class ParameterManager:
 
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
-        self.tracker_name = self.config.tracker
-        self.output_dir = create_output(
-            self.config.output_dir, f"{self.config.tracker}/data"
-        )
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self._tracker = None
-        self.use_ocsort, self.with_feature = self.set_useocsort_feat()
+        self.tracker_name = None
+        self.text_filename = None
+        self.folder_name = None
+        self.use_ocsort = None
+        self.with_feature = None
+
+    def set_text_filename(self):
+        pred_name = self.config.predictor
+        frame_use = self.config.frame_use
+        if self.tracker_name.upper() != "DEEPOCSORT":
+            self.config.matcher = None
+        text = f"{pred_name}_FPS{frame_use}_{self.config.matcher}"
+        self.text_filename = text.upper()
 
     def set_useocsort_feat(self):
-        if self.tracker_name == "DeepOCSORT":
-            return True, True
-        elif self.tracker_name == "OCSORT":
-            return True, False
-        elif self.tracker_name == "DeepSORT":
-            return False, True
+        if self.tracker_name.upper() == "DEEPOCSORT":
+            self.folder_name = "CATaft03-test"
+            self.use_ocsort = True
+            self.with_feature = True
+        elif self.tracker_name.upper() == "OCSORT":
+            self.folder_name = "CATaft02-test"
+            self.use_ocsort = True
+            self.with_feature = False
+        elif self.tracker_name.upper() == "DEEPSORT":
+            self.folder_name = "CATaft01-test"
+            self.use_ocsort = False
+            self.with_feature = True
 
 
 class LayerHook:
@@ -101,8 +113,8 @@ class VideoProcessor:
         frame_skip (int):           number of frames to be skipped when processing
     """
 
-    def __init__(self):
-        self.param = ParameterManager("configs/demo_config.yaml")
+    def __init__(self, param):
+        self.param = param
         self.video = cv2.VideoCapture(self.param.config.video_path)
         self.fps = self.video.get(cv2.CAP_PROP_FPS)
         self.logger = initiate_logging(self.param.config.predictor)
@@ -110,6 +122,9 @@ class VideoProcessor:
         self.predictor = DefaultPredictor(cfg)
         self.metadata = MetadataCatalog.get(
             cfg.DATASETS.TEST[0] if len(cfg.DATASETS.TEST) else "__unused"
+        )
+        self.output_dir = create_output(
+            param.config.output_dir, f"{param.folder_name}/{param.tracker_name}/data"
         )
 
     @property
@@ -151,15 +166,17 @@ class VideoProcessor:
         configuration.freeze()
         return configuration
 
-    def set_hooker(self):
+    def set_hooker(self, hooker=None):
         if self.param.config.predictor.upper() == "MASKRCNN":
-            hooker = LayerHook()
-            hooker.register(self.predictor.model, ["roi_heads.mask_pooler"])
-        else:
-            hooker = None
+            if (
+                self.param.tracker_name.upper() == "DEEPSORT"
+                or self.param.config.matcher is None
+            ):
+                hooker = LayerHook()
+                hooker.register(self.predictor.model, ["roi_heads.mask_pooler"])
         return hooker
 
-    def post_process(self, predictions, mask_pool=None):
+    def post_process(self, predictions, mask_pool=None, matcher=None):
         """Filter predictions
         Args:
             predictions (Instances): the output of an instance detection/segmentation
@@ -215,15 +232,20 @@ class VideoProcessor:
             pred_masks = None if pred_masks is None else pred_masks[visibilities]
             seg_masks = pred_masks
 
-            if mask_pool is None:
-                if predictions.has("feat_masks"):
-                    feat_masks = predictions.feat_masks
-                    feat_masks = feat_masks[filter_mask]
+            if matcher is None:
+                if mask_pool is None:
+                    if predictions.has("feat_masks"):
+                        feat_masks = predictions.feat_masks
+                        feat_masks = feat_masks[filter_mask]
+                    else:
+                        feat_masks = None
+                    feat_masks = (
+                        None if feat_masks is None else feat_masks[visibilities]
+                    )
                 else:
-                    feat_masks = None
-                feat_masks = None if feat_masks is None else feat_masks[visibilities]
+                    feat_masks = mask_pool
             else:
-                feat_masks = mask_pool
+                feat_masks = None
 
             # labels = _create_text_labels(
             #     classes, scores, metadata.get("thing_classes", None)
@@ -360,29 +382,49 @@ class VideoProcessor:
             condition = True
         if condition:
             is_included = True
-            # if frame is not None:
-            #     intbox = tuple(map(int, box))
-            #     cv2.rectangle(
-            #         frame, intbox[0:2], intbox[2:4], color=(0, 0, 255), thickness=1
-            #     )
+            if frame is not None:
+                intbox = tuple(map(int, box))
+                cv2.rectangle(
+                    frame, intbox[0:2], intbox[2:4], color=(0, 0, 0), thickness=1
+                )
         return is_included, frame
 
     def ocsort(
-        self, frame_id, feat_masks, boxes, scores, classes, results, thing_classes
+        self,
+        raw_img,
+        frame_id,
+        feat_masks,
+        boxes,
+        scores,
+        classes,
+        results,
+        thing_classes,
     ):
         detections = []
+        # cnt = 0
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-            is_included, _ = self.filter_box(box)
+            is_included, raw_img = self.filter_box(box, raw_img)
             if is_included:
                 det = np.insert(box, 4, score)
                 det = np.insert(det, 5, label)
-                feat = np.array(feat).flatten()
+                if self.param.config.matcher is None:
+                    feat = np.array(feat).flatten()
+                else:
+                    intbox = list(map(int, box))
+                    crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
+                    crop = cv2.resize(crop, (256, 256))
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    feat = np.array(gray).flatten()
+                    # cnt += 1
+                    # cv2.imwrite(f"cropped/{frame_id}_{cnt}.jpg", crop)
                 # feat = np.array(feat)
                 # shape = min(feat.shape)
                 # feat = np.resize(feat, (shape, shape)).flatten()
                 det = np.asarray(np.insert(det, 6, feat))
                 detections.append(det)
-        targets = self._tracker.update(np.asarray(detections), self.param.with_feature)
+        targets = self._tracker.update(
+            np.asarray(detections), self.param.with_feature, self.param.config.matcher
+        )
         track_tlwhs = []
         track_ids = []
         track_classes = []
@@ -411,20 +453,28 @@ class VideoProcessor:
                 results.append(
                     f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
                 )
-        return track_tlwhs, track_ids, track_classes, results
+        return track_tlwhs, track_ids, track_classes, results, raw_img
 
     def deepsort(
-        self, frame_id, feat_masks, boxes, scores, classes, results, thing_classes
+        self,
+        raw_img,
+        frame_id,
+        feat_masks,
+        boxes,
+        scores,
+        classes,
+        results,
+        thing_classes,
     ):
         detections = []
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-            is_included, _ = self.filter_box(box)
+            is_included, raw_img = self.filter_box(box, raw_img)
             if is_included:
-                feat = np.array(feat)
-                shape = min(feat.shape)
-                feature = np.resize(feat, (shape, shape)).flatten()
+                feat = np.array(feat).flatten()
+                # shape = min(feat.shape)
+                # feat = np.resize(feat, (shape, shape)).flatten()
                 det = detection.Detection(
-                    np.array(box), score, thing_classes[label], feature
+                    np.array(box), score, thing_classes[label], feat
                 )
                 detections.append(det)
         self._tracker.predict()
@@ -439,9 +489,9 @@ class VideoProcessor:
             box_width = tlwh[2]
             box_height = tlwh[3]
             tid = track.track_id
-            vertical = box_width / box_height > self.param.config._ASPECT_RATIO_THRESH
+            vertical = box_width / box_height > self.param.config._aspect_ratio_thresh
             if (
-                box_width * box_height > self.param.config._MIN_BOX_AREA_THRESH
+                box_width * box_height > self.param.config._min_box_area_thresh
                 and not vertical
             ):
                 track_tlwhs.append(tlwh)
@@ -450,7 +500,7 @@ class VideoProcessor:
                 results.append(
                     f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
                 )
-        return track_tlwhs, track_ids, track_classes, results
+        return track_tlwhs, track_ids, track_classes, results, raw_img
 
     def process(self):
         width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -459,8 +509,7 @@ class VideoProcessor:
         basename, _ = os.path.splitext(os.path.basename(self.param.config.video_path))
         # current_time = time.localtime()
         # timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-        output_name = self.param.config.text_filename.upper()
-        save_folder = os.path.join(self.param.output_dir, output_name)
+        save_folder = os.path.join(self.output_dir, self.param.text_filename)
         os.makedirs(save_folder, exist_ok=True)
         if self.param.config.is_save_result:
             save_path = os.path.join(save_folder, basename)
@@ -486,8 +535,6 @@ class VideoProcessor:
         frame_id = 0
         results = []
 
-        frame_count = self.video.get(cv2.CAP_PROP_FRAME_COUNT)
-        prog_bar = ProgressBar(int(frame_count), fmt=ProgressBar.FULL)
         while True:
             if frame_id % self.fps == 0:
                 self.logger.info(
@@ -503,14 +550,15 @@ class VideoProcessor:
                     hooker = self.set_hooker()
                     predictions = self.predictor(frame)
                     predictions = predictions["instances"].to(torch.device("cpu"))
-                    if hooker:
+                    if hooker and self.param.config.matcher is None:
                         mask_pool = hooker.outputs[-1].cpu().numpy()
                         hooker.remove()
                     else:
                         mask_pool = None
-                    # try:
                     feat_masks, boxes, scores, classes = self.post_process(
-                        predictions, mask_pool
+                        predictions,
+                        mask_pool,
+                        self.param.config.matcher,
                     )
                     if boxes.any():
                         # TODO: tracking
@@ -520,7 +568,9 @@ class VideoProcessor:
                                 track_ids,
                                 track_classes,
                                 results,
+                                raw_img,
                             ) = self.deepsort(
+                                raw_img,
                                 frame_id,
                                 feat_masks,
                                 boxes,
@@ -535,7 +585,9 @@ class VideoProcessor:
                                 track_ids,
                                 track_classes,
                                 results,
+                                raw_img,
                             ) = self.ocsort(
+                                raw_img,
                                 frame_id,
                                 feat_masks,
                                 boxes,
@@ -557,30 +609,47 @@ class VideoProcessor:
                         for box in boxes:
                             _, res_image = self.filter_box(box, res_image)
                         cv2.imwrite(res_path, res_image)
-                    # except Exception as e:
-                    #     print(frame_id, e)
-                else:
-                    timer.toc()
-                    res_image = raw_img
-                if self.param.config.is_save_result:
-                    vid_writer.write(res_image)
-                ch = cv2.waitKey(1)
-                if ch == 27 or ch == ord("q") or ch == ord("Q"):
-                    break
+                    if self.param.config.is_save_result:
+                        vid_writer.write(res_image)
             else:
+                timer.toc()
+                self.logger.info(f"Average Time: {timer.average_time}")
+                self.logger.info(f"Total Time: {timer.total_time}")
                 break
             frame_id += 1
-            # Update progress bar
-            prog_bar.current += 1
-            prog_bar()
-        prog_bar.done()
         if self.param.config.is_save_result:
-            res_file = os.path.join(self.param.output_dir, f"{output_name}.txt")
+            res_file = os.path.join(self.output_dir, f"{self.param.text_filename}.txt")
             with open(res_file, "w") as f:
                 f.writelines(results)
             self.logger.info(f"save results to {res_file}")
 
 
-if __name__ == "__main__":
-    processor = VideoProcessor()
+def start_process(param):
+    param.set_text_filename()
+    param.set_useocsort_feat()
+    processor = VideoProcessor(param)
     processor.process()
+
+
+if __name__ == "__main__":
+    batch = False
+    if batch:
+        param = ParameterManager("configs/demo_config.yaml")
+        for predictor in ["SOLOv2", "MaskRCNN"]:
+            param.config.predictor = predictor.upper()
+            if predictor.upper() == "SOLOV2":
+                ext = "pth"
+            elif predictor.upper() == "MASKRCNN":
+                ext = "pkl"
+            param.config.config_file = (
+                f"configs/{predictor}/{predictor}_R50_FPN_3x.yaml"
+            )
+            param.config.weight_file = f"checkpoints/{predictor}_R50_3x.{ext}"
+            for tracker_name in ["DEEPSORT", "OCSORT", "DEEPOCSORT"]:
+                param.tracker_name = tracker_name
+                param.config.matcher = None
+                start_process(param)
+    else:
+        param = ParameterManager("configs/demo_config.yaml")
+        param.tracker_name = param.config.tracker
+        start_process(param)

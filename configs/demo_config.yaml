@@ -1,16 +1,20 @@
-tracker : DeepOCSORT
-predictor : MaskRCNN
+tracker : DEEPOCSORT
+# MASKRCNN SOLOV2
+predictor : MASKRCNN
+# AKAZE_BF AKAZE_FLANN BRISK_BF BRISK_FLANN ORB_BF ORB_FLANN
+matcher : AKAZE_FLANN
+# SOLOv2/SOLOv2_R50_FPN_3x MaskRCNN/MaskRCNN_R50_FPN_3x
 config_file : configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml
+# SOLOv2_R50_3x.pth MaskRCNN_R50_3x.pkl
 weight_file : checkpoints/MaskRCNN_R50_3x.pkl
 is_save_result : True
 frame_use : 1
-video_path : /home/catchall/Documents/data_preprocess/data/videos/ch01_20190813145955.mp4
-output_dir : /home/catchall/Documents/TrackEval/data/trackers/mot_challenge/CATaft-test
-text_filename : MaskRCNN_FPS1_CH01  # for TrackEval
+video_path : /home/catchall/Documents/data_preprocess/data/videos/ch08af_20190804170000-11.mp4
+output_dir : /home/catchall/Documents/TrackEval/data/trackers/mot_challenge
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 class_list : [1, 2, 3, 5, 7]
-roi :
-# roi : [885.80, 0.00, 1918.25, 243.53]  # 1
+# roi :
+roi : [885.80, 0.00, 1918.25, 243.53]  # 1
 # roi : [883.99, 1.65, 1918.08, 241.23] #2
 confidence_threshold : 0.5
 iop_threshold : 0.1

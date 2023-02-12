@@ -1,6 +1,40 @@
 import torch
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from .features import AKAZE, ORB, BRISK, features, matcher
+
+
+def featmatch_batch(det_imgs, trk_imgs, desc_match="AKAZE_BF"):
+    def _matcher(descriptor, a, b, match="FLANN"):
+        a = a.reshape(256, 256)
+        uint_img1 = np.array(a * 255).astype("uint8")
+        b = b.reshape(256, 256)
+        uint_img2 = np.array(b * 255).astype("uint8")
+        descriptor1 = features(descriptor, uint_img1)
+        descriptor2 = features(descriptor, uint_img2)
+        if descriptor1 is None or descriptor2 is None:
+            num_match = 0
+        else:
+            num_match = matcher(descriptor1, descriptor2, match)
+        return num_match
+
+    desc, match = desc_match.split("_")
+    if desc == "AKAZE":
+        descriptor = AKAZE()
+    elif desc == "ORB":
+        descriptor = ORB()
+    elif desc == "BRISK":
+        descriptor = BRISK()
+    fm_matrix = np.zeros((len(det_imgs), len(trk_imgs)))
+    for d_idx, det_img in enumerate(det_imgs):
+        for t_idx, trk_img in enumerate(trk_imgs):
+            fm_matrix[d_idx, t_idx] = _matcher(descriptor, det_img, trk_img, match)
+    max_fm = np.amax(fm_matrix)
+    if max_fm:
+        fm_matrix = fm_matrix / max_fm
+    # max_m = fm_matrix.argmax(axis=1)
+    # max_v = np.amax(fm_matrix, axis=1)
+    return fm_matrix
 
 
 def cosine_batch(det_feats, trk_feats):
@@ -9,12 +43,14 @@ def cosine_batch(det_feats, trk_feats):
         b = torch.from_numpy(b)
         return metric(a, b)
 
-    cost_matrix = np.zeros((len(det_feats), len(trk_feats)))
+    cos_matrix = np.zeros((len(det_feats), len(trk_feats)))
     cosi = torch.nn.CosineSimilarity(dim=0)
     for d_idx, det_feat in enumerate(det_feats):
         for t_idx, trk_feat in enumerate(trk_feats):
-            cost_matrix[d_idx, t_idx] = _cosine_distance(cosi, trk_feat, det_feat)
-    return cost_matrix
+            cos_matrix[d_idx, t_idx] = _cosine_distance(cosi, trk_feat, det_feat)
+    # max_m = cos_matrix.argmax(axis=1)
+    # max_v = np.amax(cos_matrix, axis=1)
+    return cos_matrix
 
 
 def iou_batch(bboxes1, bboxes2):
@@ -31,12 +67,14 @@ def iou_batch(bboxes1, bboxes2):
     w = np.maximum(0.0, xx2 - xx1)
     h = np.maximum(0.0, yy2 - yy1)
     wh = w * h
-    o = wh / (
+    iou_matrix = wh / (
         (bboxes1[..., 2] - bboxes1[..., 0]) * (bboxes1[..., 3] - bboxes1[..., 1])
         + (bboxes2[..., 2] - bboxes2[..., 0]) * (bboxes2[..., 3] - bboxes2[..., 1])
         - wh
     )
-    return o
+    # max_m = iou_matrix.argmax(axis=1)
+    # max_v = np.amax(iou_matrix, axis=1)
+    return iou_matrix
 
 
 def giou_batch(bboxes1, bboxes2):
@@ -216,6 +254,16 @@ def linear_assignment(cost_matrix):
     return np.array(list(zip(x, y)))
 
 
+def compute_cost(iou_matrix, feat_matrix):
+    if feat_matrix is None:
+        cost_matrix = iou_matrix
+    else:
+        cost_matrix = np.add(iou_matrix * 0.65, feat_matrix * 0.35)
+    # max_m = cost_matrix.argmax(axis=1)
+    # max_v = np.amax(cost_matrix, axis=1)
+    return cost_matrix
+
+
 def associate(
     detections,
     trackers,
@@ -225,6 +273,8 @@ def associate(
     vdc_weight,
     length,
     with_feature=False,
+    desc_matcher=None,
+    feat_matrix=None,
 ):
     if len(trackers) == 0:
         return (
@@ -244,12 +294,18 @@ def associate(
     valid_mask = np.ones(previous_obs.shape[0])
     valid_mask[np.where(previous_obs[:, 4] < 0)] = 0
 
+    iou_matrix = iou_batch(detections, trackers)
+    # print(f"iou: {iou_matrix}")
     if with_feature:
-        cos_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
-        iou_matrix = iou_batch(detections, trackers)
-        cost_matrix = np.add(iou_matrix * 0.65, cos_matrix * 0.35)
-    else:
-        cost_matrix = iou_batch(detections, trackers)
+        if desc_matcher is None:
+            feat_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
+        else:
+            feat_matrix = featmatch_batch(
+                detections[:, 6:], trackers[:, 6:], desc_matcher
+            )
+    # print(f"feat: {feat_matrix}")
+    cost_matrix = compute_cost(iou_matrix, feat_matrix)
+    # print(f"cost: {cost_matrix}")
     scores = np.repeat(detections[:, -1][:, np.newaxis], trackers.shape[0], axis=1)
     # iou_matrix = iou_matrix * scores # a trick sometiems works, we don't encourage this
     valid_mask = np.repeat(valid_mask[:, np.newaxis], X.shape[1], axis=1)

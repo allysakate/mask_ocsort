@@ -240,7 +240,7 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, dets, with_feature=False):
+    def update(self, dets, with_feature=False, desc_matcher=None):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score,class],[x1,y1,x2,y2,score,class],...]
@@ -292,6 +292,7 @@ class OCSort(object):
             self.inertia,
             length,
             with_feature,
+            desc_matcher,
         )
         for m in matched:
             self.trackers[m[1]].update(dets[m[0], :])
@@ -330,6 +331,8 @@ class OCSort(object):
         # create and initialise new trackers for unmatched detections
         for i in unmatched_dets:
             trk = KalmanBoxTracker(dets[i, :], delta_t=self.delta_t, length=length)
+            trk.category = dets[i, 5]
+            trk.feature = dets[i, 6:]
             self.trackers.append(trk)
         i = len(self.trackers)
         for trk in reversed(self.trackers):
