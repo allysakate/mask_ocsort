@@ -17,6 +17,7 @@ from detectron2.layers import paste_masks_in_image
 from models.config import get_cfg
 from models.utils.datasets import letterbox
 from models.utils.general import non_max_suppression_mask_conf
+from models.feature_extractor import Extractor
 from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
@@ -52,6 +53,13 @@ class ParameterManager:
         self.folder_name = None
         self.use_ocsort = None
         self.with_feature = None
+        if self.model_device == "cuda:0":
+            use_cuda = True
+        else:
+            use_cuda = False
+        self.extractor = Extractor(
+            "checkpoints/CosineMetric_Learning.t7", use_cuda=use_cuda
+        )
 
     def set_text_filename(self):
         pred_name = self.predictor_name
@@ -219,7 +227,64 @@ class VideoProcessor:
                 hooker.register(self.predictor.model, [node])
         return hooker
 
-    def post_process(self, predictions, mask_pool=None, matcher=None):
+    def yolo_process(self, predictions, frame_dim, orig_image_dim):
+        inf_out, _, attn, _, bases, sem_output = (
+            predictions["test"],
+            predictions["bbox_and_cls"],
+            predictions["attn"],
+            predictions["mask_iou"],
+            predictions["bases"],
+            predictions["sem"],
+        )
+        bases = torch.cat([bases, sem_output], dim=1)
+        height, width = frame_dim
+        pooler_scale = self.predictor.pooler_scale
+        pooler = ROIPooler(
+            output_size=self.cfg["mask_resolution"],
+            scales=(pooler_scale,),
+            sampling_ratio=1,
+            pooler_type="ROIAlignV2",
+            canonical_level=2,
+        )
+        output, output_mask, _, _, _ = non_max_suppression_mask_conf(
+            inf_out,
+            attn,
+            bases,
+            pooler,
+            self.cfg,
+            conf_thres=0.25,
+            iou_thres=0.65,
+            merge=False,
+            mask_iou=None,
+        )
+        pred, pred_masks = output[0], output_mask[0]
+        _ = bases[0]
+        bboxes = Boxes(pred[:, :4])
+        feat_masks = pred_masks.view(
+            -1, self.cfg["mask_resolution"], self.cfg["mask_resolution"]
+        )
+        pred_masks = retry_if_cuda_oom(paste_masks_in_image)(
+            feat_masks, bboxes, (height, width), threshold=0.5
+        )
+        seg_masks = pred_masks.detach().cpu().numpy()
+        classes = pred[:, 5].detach().cpu().numpy()
+        scores = pred[:, 4].detach().cpu().numpy()
+        # TODO: Fix scaling
+        raw_h, raw_w = orig_image_dim
+        y_scale, x_scale = raw_h / height, raw_w / width
+        bboxes = bboxes.tensor.detach().cpu().numpy()
+        boxes = []
+        for box in bboxes:
+            x = int(np.round(box[0] * x_scale))
+            y = int(np.round(box[1] * y_scale))
+            xmax = int(np.round(box[2] * (x_scale)))
+            ymax = int(np.round(box[3] * y_scale))
+            boxes.append([x, y, xmax, ymax])
+        boxes = np.array(boxes)
+        feat_masks = feat_masks.cpu().numpy()
+        return feat_masks, seg_masks, boxes, scores, classes
+
+    def det2_process(self, predictions, mask_pool=None, matcher=None):
         """Filter predictions
         Args:
             predictions (Instances): the output of an instance detection/segmentation
@@ -445,9 +510,10 @@ class VideoProcessor:
                 else:
                     intbox = list(map(int, box))
                     crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
-                    crop = cv2.resize(crop, (256, 256))
-                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    feat = np.array(gray).flatten()
+                    # crop = cv2.resize(crop, (256, 256))
+                    # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    # feat = np.array(gray).flatten()
+                    feat = self.param.extractor([crop]).flatten()
                     # cnt += 1
                     # cv2.imwrite(f"cropped/{frame_id}_{cnt}.jpg", crop)
                 # feat = np.array(feat)
@@ -503,7 +569,13 @@ class VideoProcessor:
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
             is_included, raw_img = self.filter_box(box, raw_img)
             if is_included:
-                feat = np.array(feat).flatten()
+                # x_feat = np.array(feat).flatten()
+                intbox = list(map(int, box))
+                crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
+                # crop = cv2.resize(crop, (256, 256))
+                # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                # feat = np.array(gray).flatten()
+                feat = self.param.extractor([crop]).flatten()
                 # shape = min(feat.shape)
                 # feat = np.resize(feat, (shape, shape)).flatten()
                 det = detection.Detection(
@@ -564,6 +636,8 @@ class VideoProcessor:
         frame_id = 0
         results = []
 
+        width = self.video.get(cv2.CAP_PROP_FRAME_WIDTH)
+        height = self.video.get(cv2.CAP_PROP_FRAME_HEIGHT)
         frame_count = self.video.get(cv2.CAP_PROP_FRAME_COUNT)
         prog_bar = ProgressBar(int(frame_count), fmt=ProgressBar.FULL)
 
@@ -591,7 +665,7 @@ class VideoProcessor:
                         else:
                             mask_pool = None
 
-                        feat_masks, _, boxes, scores, classes = self.post_process(
+                        feat_masks, _, boxes, scores, classes = self.det2_process(
                             predictions,
                             mask_pool,
                             self.param.config.matcher,
@@ -599,61 +673,11 @@ class VideoProcessor:
 
                     else:
                         frame = self.set_frame(frame)
+                        _, _, f_height, f_width = frame.shape
                         predictions = self.predictor(frame)
-                        inf_out, _, attn, _, bases, sem_output = (
-                            predictions["test"],
-                            predictions["bbox_and_cls"],
-                            predictions["attn"],
-                            predictions["mask_iou"],
-                            predictions["bases"],
-                            predictions["sem"],
+                        feat_masks, _, boxes, scores, classes = self.yolo_process(
+                            predictions, (f_height, f_width), (height, width)
                         )
-                        bases = torch.cat([bases, sem_output], dim=1)
-                        _, _, height, width = frame.shape
-                        pooler_scale = self.predictor.pooler_scale
-                        pooler = ROIPooler(
-                            output_size=self.cfg["mask_resolution"],
-                            scales=(pooler_scale,),
-                            sampling_ratio=1,
-                            pooler_type="ROIAlignV2",
-                            canonical_level=2,
-                        )
-                        output, output_mask, _, _, _ = non_max_suppression_mask_conf(
-                            inf_out,
-                            attn,
-                            bases,
-                            pooler,
-                            self.cfg,
-                            conf_thres=0.25,
-                            iou_thres=0.65,
-                            merge=False,
-                            mask_iou=None,
-                        )
-                        pred, pred_masks = output[0], output_mask[0]
-                        _ = bases[0]
-                        bboxes = Boxes(pred[:, :4])
-                        feat_masks = pred_masks.view(
-                            -1, self.cfg["mask_resolution"], self.cfg["mask_resolution"]
-                        )
-                        pred_masks = retry_if_cuda_oom(paste_masks_in_image)(
-                            feat_masks, bboxes, (height, width), threshold=0.5
-                        )
-                        _ = pred_masks.detach().cpu().numpy()
-                        classes = pred[:, 5].detach().cpu().numpy()
-                        scores = pred[:, 4].detach().cpu().numpy()
-                        # TODO: Fix scaling
-                        raw_h, raw_w, _ = raw_img.shape
-                        y_scale, x_scale = raw_h / height, raw_w / width
-                        bboxes = bboxes.tensor.detach().cpu().numpy()
-                        boxes = []
-                        for box in bboxes:
-                            x = int(np.round(box[0] * x_scale))
-                            y = int(np.round(box[1] * y_scale))
-                            xmax = int(np.round(box[2] * (x_scale)))
-                            ymax = int(np.round(box[3] * y_scale))
-                            boxes.append([x, y, xmax, ymax])
-                        boxes = np.array(boxes)
-                        feat_masks = feat_masks.cpu().numpy()
                     if boxes.any():
                         # TODO: tracking
                         if not self.param.use_ocsort:
@@ -734,7 +758,7 @@ def start_process(param, is_yolo=False):
 
 
 if __name__ == "__main__":
-    batch = False
+    batch = True
     param = ParameterManager("configs/demo_config.yaml")
     is_yolo = False
     if batch:
