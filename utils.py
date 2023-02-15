@@ -124,12 +124,12 @@ def initiate_logging(script: str):
     logger = logging.getLogger()
     logger.setLevel(logging.NOTSET)
 
-    # our first handler is a console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.NOTSET)
-    console_handler_format = "%(asctime)s | %(levelname)s: %(message)s"
-    console_handler.setFormatter(logging.Formatter(console_handler_format))
-    logger.addHandler(console_handler)
+    # # our first handler is a console handler
+    # console_handler = logging.StreamHandler()
+    # console_handler.setLevel(logging.NOTSET)
+    # console_handler_format = "%(asctime)s | %(levelname)s: %(message)s"
+    # console_handler.setFormatter(logging.Formatter(console_handler_format))
+    # logger.addHandler(console_handler)
 
     # the second handler is a file handler
     file_handler = logging.FileHandler(log_name)

@@ -1,19 +1,27 @@
 import os
+import yaml
 from typing import List
 from functools import reduce
 import torch
 import torch.nn as nn
+from torchvision import transforms
 import cv2
 import numpy as np
 from torchvision.ops import masks_to_boxes
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.data import MetadataCatalog
+from detectron2.modeling.poolers import ROIPooler
+from detectron2.structures import Boxes
+from detectron2.utils.memory import retry_if_cuda_oom
+from detectron2.layers import paste_masks_in_image
 from models.config import get_cfg
-
+from models.utils.datasets import letterbox
+from models.utils.general import non_max_suppression_mask_conf
 from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
 from utils import initiate_logging, get_config, create_output, get_IOP
+from progress_bar import ProgressBar
 
 
 class ParameterManager:
@@ -38,6 +46,7 @@ class ParameterManager:
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.predictor_name = None
         self.tracker_name = None
         self.text_filename = None
         self.folder_name = None
@@ -45,23 +54,23 @@ class ParameterManager:
         self.with_feature = None
 
     def set_text_filename(self):
-        pred_name = self.config.predictor
+        pred_name = self.predictor_name
         frame_use = self.config.frame_use
-        if self.tracker_name.upper() != "DEEPOCSORT":
+        if self.tracker_name != "DEEPOCSORT":
             self.config.matcher = None
         text = f"{pred_name}_FPS{frame_use}_{self.config.matcher}"
         self.text_filename = text.upper()
 
     def set_useocsort_feat(self):
-        if self.tracker_name.upper() == "DEEPOCSORT":
+        if self.tracker_name == "DEEPOCSORT":
             self.folder_name = "CATaft03-test"
             self.use_ocsort = True
             self.with_feature = True
-        elif self.tracker_name.upper() == "OCSORT":
+        elif self.tracker_name == "OCSORT":
             self.folder_name = "CATaft02-test"
             self.use_ocsort = True
             self.with_feature = False
-        elif self.tracker_name.upper() == "DEEPSORT":
+        elif self.tracker_name == "DEEPSORT":
             self.folder_name = "CATaft01-test"
             self.use_ocsort = False
             self.with_feature = True
@@ -113,16 +122,19 @@ class VideoProcessor:
         frame_skip (int):           number of frames to be skipped when processing
     """
 
-    def __init__(self, param):
+    def __init__(self, param, is_yolo):
         self.param = param
         self.video = cv2.VideoCapture(self.param.config.video_path)
         self.fps = self.video.get(cv2.CAP_PROP_FPS)
-        self.logger = initiate_logging(self.param.config.predictor)
-        cfg = self.setup_config()
-        self.predictor = DefaultPredictor(cfg)
-        self.metadata = MetadataCatalog.get(
-            cfg.DATASETS.TEST[0] if len(cfg.DATASETS.TEST) else "__unused"
-        )
+        self.logger = initiate_logging(self.param.predictor_name)
+        self.device = torch.device(self.param.model_device)
+        self.cfg = None
+        self.class_names = None
+        self.period_threshold = 0
+        if not is_yolo:
+            self.predictor = self.set_det2model()
+        else:
+            self.predictor = self.set_yolomodel()
         self.output_dir = create_output(
             param.config.output_dir, f"{param.folder_name}/{param.tracker_name}/data"
         )
@@ -136,7 +148,25 @@ class VideoProcessor:
             frame_use = self.param.config.frame_use
         return int(self.fps / frame_use)
 
-    def setup_config(self):
+    def set_yolomodel(self):
+        with open(self.param.config.config_file) as f:
+            self.cfg = yaml.load(f, Loader=yaml.FullLoader)
+        weights = torch.load(self.param.config.weight_file)
+        model = weights["model"]
+        model = model.half().to(self.device)
+        model.eval()
+        self.class_names = model.names
+        return model
+
+    def set_frame(self, image):
+        image = letterbox(image, 640, stride=64, auto=True)[0]
+        image = transforms.ToTensor()(image)
+        image = torch.tensor(np.array([image.numpy()]))
+        image = image.to(self.device)
+        image = image.half()
+        return image
+
+    def set_det2model(self):
         """Load config from file and command-line arguments
         Returns:
             configuration
@@ -152,7 +182,7 @@ class VideoProcessor:
         configuration.MODEL.ROI_HEADS.SCORE_THRESH_TEST = (
             self.param.config.confidence_threshold
         )
-        if self.param.config.predictor.upper() == "SOLOV2":
+        if self.param.predictor_name == "SOLOV2":
             configuration.MODEL.FCOS.INFERENCE_TH_TEST = (
                 self.param.config.confidence_threshold
             )
@@ -164,16 +194,29 @@ class VideoProcessor:
             self.param.config.confidence_threshold
         )
         configuration.freeze()
-        return configuration
+        model = DefaultPredictor(configuration)
+        metadata = MetadataCatalog.get(
+            configuration.DATASETS.TEST[0]
+            if len(configuration.DATASETS.TEST)
+            else "__unused"
+        )
+        self.period_threshold = metadata.get("period_threshold", 0)
+        self.class_names = metadata.get("thing_classes", None)
+        return model
 
     def set_hooker(self, hooker=None):
-        if self.param.config.predictor.upper() == "MASKRCNN":
+        if self.param.predictor_name in ["MASKRCNN", "FASTERRCNN"]:
             if (
-                self.param.tracker_name.upper() == "DEEPSORT"
-                or self.param.config.matcher is None
+                self.param.tracker_name in ["DEEPSORT", "DEEPOCSORT"]
+                and self.param.config.matcher is None
             ):
                 hooker = LayerHook()
-                hooker.register(self.predictor.model, ["roi_heads.mask_pooler"])
+                if self.param.predictor_name == "MASKRCNN":
+                    node = "roi_heads.mask_pooler"  # (19, 256, 14, 14)
+                # TODO: Error on getting feat mask
+                elif self.param.predictor_name == "FASTERRCNN":
+                    node = "roi_heads.box_predictor.bbox_pred"
+                hooker.register(self.predictor.model, [node])
         return hooker
 
     def post_process(self, predictions, mask_pool=None, matcher=None):
@@ -215,11 +258,10 @@ class VideoProcessor:
             periods = predictions.ID_period if predictions.has("ID_period") else None
             if periods:
                 periods = periods[filter_mask]
-            period_threshold = self.metadata.get("period_threshold", 0)
             visibilities = (
                 [True] * len(boxes)
                 if periods is None
-                else [x > period_threshold for x in periods]
+                else [x > self.period_threshold for x in periods]
             )
 
             if predictions.has("pred_masks"):
@@ -246,15 +288,6 @@ class VideoProcessor:
                     feat_masks = mask_pool
             else:
                 feat_masks = None
-
-            # labels = _create_text_labels(
-            #     classes, scores, metadata.get("thing_classes", None)
-            # )
-            # labels = (
-            #     None
-            #     if labels is None
-            #     else [y[0] for y in filter(lambda x: x[1], zip(labels, visibilities))]
-            # )  # noqa
 
             # Display in largest to smallest order to reduce occlusion.
             areas = None
@@ -286,7 +319,7 @@ class VideoProcessor:
                 if seg_masks is not None:
                     frame_boxes = masks_to_boxes(seg_masks)
 
-            return feat_masks, frame_boxes, scores, classes
+            return feat_masks, seg_masks, frame_boxes, scores, classes
 
     def plot_tracking(
         self,
@@ -398,7 +431,7 @@ class VideoProcessor:
         scores,
         classes,
         results,
-        thing_classes,
+        class_names,
     ):
         detections = []
         # cnt = 0
@@ -447,7 +480,7 @@ class VideoProcessor:
                 track_tlwhs.append(tlwh)
                 track_ids.append(tid)
                 if tclass in self.param.config.class_list:
-                    track_classes.append(thing_classes[tclass])
+                    track_classes.append(class_names[tclass])
                 else:
                     track_classes.append(None)
                 results.append(
@@ -464,7 +497,7 @@ class VideoProcessor:
         scores,
         classes,
         results,
-        thing_classes,
+        class_names,
     ):
         detections = []
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
@@ -474,7 +507,7 @@ class VideoProcessor:
                 # shape = min(feat.shape)
                 # feat = np.resize(feat, (shape, shape)).flatten()
                 det = detection.Detection(
-                    np.array(box), score, thing_classes[label], feat
+                    np.array(box), score, class_names[int(label)], feat
                 )
                 detections.append(det)
         self._tracker.predict()
@@ -502,7 +535,7 @@ class VideoProcessor:
                 )
         return track_tlwhs, track_ids, track_classes, results, raw_img
 
-    def process(self):
+    def process(self, is_yolo):
         width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
         # num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -522,10 +555,6 @@ class VideoProcessor:
             )
 
         frame_id = 0
-        thing_classes = self.metadata.get("thing_classes", None)
-        # thing_classes[0] = "car"
-        # thing_classes[1] = "person"
-        # thing_classes[2] = "ignore"
         if not self.param.use_ocsort:
             metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
             self._tracker = tracker.Tracker(metric)
@@ -534,6 +563,9 @@ class VideoProcessor:
         timer = Timer()
         frame_id = 0
         results = []
+
+        frame_count = self.video.get(cv2.CAP_PROP_FRAME_COUNT)
+        prog_bar = ProgressBar(int(frame_count), fmt=ProgressBar.FULL)
 
         while True:
             if frame_id % self.fps == 0:
@@ -548,18 +580,80 @@ class VideoProcessor:
                 timer.tic()
                 if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
                     hooker = self.set_hooker()
-                    predictions = self.predictor(frame)
-                    predictions = predictions["instances"].to(torch.device("cpu"))
-                    if hooker and self.param.config.matcher is None:
-                        mask_pool = hooker.outputs[-1].cpu().numpy()
-                        hooker.remove()
+
+                    if not is_yolo:
+                        predictions = self.predictor(frame)
+                        predictions = predictions["instances"].to(torch.device("cpu"))
+
+                        if hooker and self.param.config.matcher is None:
+                            mask_pool = hooker.outputs[-1].cpu().numpy()
+                            hooker.remove()
+                        else:
+                            mask_pool = None
+
+                        feat_masks, _, boxes, scores, classes = self.post_process(
+                            predictions,
+                            mask_pool,
+                            self.param.config.matcher,
+                        )
+
                     else:
-                        mask_pool = None
-                    feat_masks, boxes, scores, classes = self.post_process(
-                        predictions,
-                        mask_pool,
-                        self.param.config.matcher,
-                    )
+                        frame = self.set_frame(frame)
+                        predictions = self.predictor(frame)
+                        inf_out, _, attn, _, bases, sem_output = (
+                            predictions["test"],
+                            predictions["bbox_and_cls"],
+                            predictions["attn"],
+                            predictions["mask_iou"],
+                            predictions["bases"],
+                            predictions["sem"],
+                        )
+                        bases = torch.cat([bases, sem_output], dim=1)
+                        _, _, height, width = frame.shape
+                        pooler_scale = self.predictor.pooler_scale
+                        pooler = ROIPooler(
+                            output_size=self.cfg["mask_resolution"],
+                            scales=(pooler_scale,),
+                            sampling_ratio=1,
+                            pooler_type="ROIAlignV2",
+                            canonical_level=2,
+                        )
+                        output, output_mask, _, _, _ = non_max_suppression_mask_conf(
+                            inf_out,
+                            attn,
+                            bases,
+                            pooler,
+                            self.cfg,
+                            conf_thres=0.25,
+                            iou_thres=0.65,
+                            merge=False,
+                            mask_iou=None,
+                        )
+                        pred, pred_masks = output[0], output_mask[0]
+                        _ = bases[0]
+                        bboxes = Boxes(pred[:, :4])
+                        feat_masks = pred_masks.view(
+                            -1, self.cfg["mask_resolution"], self.cfg["mask_resolution"]
+                        )
+                        pred_masks = retry_if_cuda_oom(paste_masks_in_image)(
+                            feat_masks, bboxes, (height, width), threshold=0.5
+                        )
+                        _ = pred_masks.detach().cpu().numpy()
+                        classes = pred[:, 5].detach().cpu().numpy()
+                        scores = pred[:, 4].detach().cpu().numpy()
+                        # TODO: Fix scaling
+                        raw_h, raw_w, _ = raw_img.shape
+                        y_scale, x_scale = raw_h / height, raw_w / width
+                        bboxes = bboxes.tensor.detach().cpu().numpy()
+                        boxes = []
+                        for box in bboxes:
+                            x = int(np.round(box[0] * x_scale))
+                            y = int(np.round(box[1] * y_scale))
+                            xmax = int(np.round(box[2] * (x_scale)))
+                            ymax = int(np.round(box[3] * y_scale))
+                            boxes.append([x, y, xmax, ymax])
+                        boxes = np.array(boxes)
+                        feat_masks = feat_masks.cpu().numpy()
                     if boxes.any():
                         # TODO: tracking
                         if not self.param.use_ocsort:
@@ -577,7 +671,7 @@ class VideoProcessor:
                                 scores,
                                 classes,
                                 results,
-                                thing_classes,
+                                self.class_names,
                             )
                         else:
                             (
@@ -594,7 +688,7 @@ class VideoProcessor:
                                 scores,
                                 classes,
                                 results,
-                                thing_classes,
+                                self.class_names,
                             )
                         timer.toc()
                         res_image = self.plot_tracking(
@@ -609,6 +703,8 @@ class VideoProcessor:
                         for box in boxes:
                             _, res_image = self.filter_box(box, res_image)
                         cv2.imwrite(res_path, res_image)
+                    else:
+                        res_image = raw_img
                     if self.param.config.is_save_result:
                         vid_writer.write(res_image)
             else:
@@ -617,6 +713,12 @@ class VideoProcessor:
                 self.logger.info(f"Total Time: {timer.total_time}")
                 break
             frame_id += 1
+
+            # Update progress bar
+            prog_bar.current += 1
+            prog_bar()
+        prog_bar.done()
+
         if self.param.config.is_save_result:
             res_file = os.path.join(self.output_dir, f"{self.param.text_filename}.txt")
             with open(res_file, "w") as f:
@@ -624,32 +726,45 @@ class VideoProcessor:
             self.logger.info(f"save results to {res_file}")
 
 
-def start_process(param):
+def start_process(param, is_yolo=False):
     param.set_text_filename()
     param.set_useocsort_feat()
-    processor = VideoProcessor(param)
-    processor.process()
+    processor = VideoProcessor(param, is_yolo)
+    processor.process(is_yolo)
 
 
 if __name__ == "__main__":
     batch = False
+    param = ParameterManager("configs/demo_config.yaml")
+    is_yolo = False
     if batch:
-        param = ParameterManager("configs/demo_config.yaml")
-        for predictor in ["SOLOv2", "MaskRCNN"]:
-            param.config.predictor = predictor.upper()
-            if predictor.upper() == "SOLOV2":
-                ext = "pth"
-            elif predictor.upper() == "MASKRCNN":
-                ext = "pkl"
-            param.config.config_file = (
-                f"configs/{predictor}/{predictor}_R50_FPN_3x.yaml"
-            )
-            param.config.weight_file = f"checkpoints/{predictor}_R50_3x.{ext}"
+        for predictor in ["SOLOv2", "MaskRCNN", "YOLOv7"]:
+            param.predictor_name = predictor.upper()
+            param.config.predictor = param.predictor_name
+            if param.predictor_name == "SOLOV2":
+                param.config.config_file = "configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml"
+                param.config.weight_file = "checkpoints/SOLOv2_R50_3x.pth"
+            elif param.predictor_name == "MASKRCNN":
+                param.config.config_file = "configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml"
+                param.config.weight_file = "checkpoints/MaskRCNN_R50_3x.pkl"
+            elif param.predictor_name == "FASTERRCNN":
+                param.config.config_file = "configs/MaskRCNN/FasterRCNN_R50_FPN_3x.yaml"
+                param.config.weight_file = "checkpoints/FasterRCNN_R50_3x.pkl"
+            elif param.predictor_name == "YOLOV7":
+                is_yolo = True
+                param.config.config_file = "configs/YOLOv7_Mask.yaml"
+                param.config.weight_file = "checkpoints/YOLOv7_Mask.pt"
             for tracker_name in ["DEEPSORT", "OCSORT", "DEEPOCSORT"]:
-                param.tracker_name = tracker_name
+                param.tracker_name = tracker_name.upper()
                 param.config.matcher = None
-                start_process(param)
+                print(f"Processing... Tracker: {tracker_name}, Predictor: {predictor}")
+                start_process(param, is_yolo)
+                print()
+            is_yolo = False
     else:
         param = ParameterManager("configs/demo_config.yaml")
-        param.tracker_name = param.config.tracker
-        start_process(param)
+        param.predictor_name = param.config.predictor.upper()
+        param.tracker_name = param.config.tracker.upper()
+        if param.predictor_name == "YOLOV7":
+            is_yolo = True
+        start_process(param, is_yolo)
