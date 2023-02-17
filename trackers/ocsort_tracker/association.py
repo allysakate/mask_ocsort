@@ -254,11 +254,16 @@ def linear_assignment(cost_matrix):
     return np.array(list(zip(x, y)))
 
 
-def compute_cost(iou_matrix, feat_matrix):
+def compute_cost(iou_matrix, feat_matrix, pos_matrix):
     if feat_matrix is None:
         cost_matrix = iou_matrix
     else:
-        cost_matrix = np.add(iou_matrix * 0.65, feat_matrix * 0.35)
+        if pos_matrix.any():
+            cost_matrix = np.add(
+                iou_matrix * 0.5, feat_matrix * 0.25, pos_matrix * 0.25
+            )
+        else:
+            cost_matrix = np.add(iou_matrix * 0.65, feat_matrix * 0.35)
     # max_m = cost_matrix.argmax(axis=1)
     # max_v = np.amax(cost_matrix, axis=1)
     return cost_matrix
@@ -275,6 +280,7 @@ def associate(
     with_feature=False,
     desc_matcher=None,
     feat_matrix=None,
+    pos_matrix=None,
 ):
     if len(trackers) == 0:
         return (
@@ -295,17 +301,15 @@ def associate(
     valid_mask[np.where(previous_obs[:, 4] < 0)] = 0
 
     iou_matrix = iou_batch(detections, trackers)
-    # print(f"iou: {iou_matrix}")
     if with_feature:
-        if desc_matcher is None:
-            feat_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
+        if desc_matcher in ["COSINE_SL", None]:
+            feat_matrix = cosine_batch(detections[:, 8:], trackers[:, 8:])
         else:
             feat_matrix = featmatch_batch(
-                detections[:, 6:], trackers[:, 6:], desc_matcher
+                detections[:, 8:], trackers[:, 8:], desc_matcher
             )
-    # print(f"feat: {feat_matrix}")
-    cost_matrix = compute_cost(iou_matrix, feat_matrix)
-    # print(f"cost: {cost_matrix}")
+        pos_matrix = 1 - 0.5 * (X + Y).T
+    cost_matrix = compute_cost(iou_matrix, feat_matrix, pos_matrix)
     scores = np.repeat(detections[:, -1][:, np.newaxis], trackers.shape[0], axis=1)
     # iou_matrix = iou_matrix * scores # a trick sometiems works, we don't encourage this
     valid_mask = np.repeat(valid_mask[:, np.newaxis], X.shape[1], axis=1)

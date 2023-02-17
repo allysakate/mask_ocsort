@@ -46,6 +46,7 @@ class ParameterManager:
 
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
+        self.matcher = self.config.matcher.upper()
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.predictor_name = None
         self.tracker_name = None
@@ -64,9 +65,7 @@ class ParameterManager:
     def set_text_filename(self):
         pred_name = self.predictor_name
         frame_use = self.config.frame_use
-        if self.tracker_name != "DEEPOCSORT":
-            self.config.matcher = None
-        text = f"{pred_name}_FPS{frame_use}_{self.config.matcher}"
+        text = f"{pred_name}_FPS{frame_use}_{self.matcher}"
         self.text_filename = text.upper()
 
     def set_useocsort_feat(self):
@@ -213,17 +212,14 @@ class VideoProcessor:
         return model
 
     def set_hooker(self, hooker=None):
-        if self.param.predictor_name in ["MASKRCNN", "FASTERRCNN"]:
+        if self.param.predictor_name == "MASKRCNN":
             if (
                 self.param.tracker_name in ["DEEPSORT", "DEEPOCSORT"]
-                and self.param.config.matcher is None
+                and self.param.matcher is None
             ):
                 hooker = LayerHook()
                 if self.param.predictor_name == "MASKRCNN":
                     node = "roi_heads.mask_pooler"  # (19, 256, 14, 14)
-                # TODO: Error on getting feat mask
-                elif self.param.predictor_name == "FASTERRCNN":
-                    node = "roi_heads.box_predictor.bbox_pred"
                 hooker.register(self.predictor.model, [node])
         return hooker
 
@@ -505,9 +501,9 @@ class VideoProcessor:
             if is_included:
                 det = np.insert(box, 4, score)
                 det = np.insert(det, 5, label)
-                if self.param.config.matcher is None:
+                if self.param.matcher is None:
                     feat = np.array(feat).flatten()
-                else:
+                elif self.param.matcher == "COSINE_SL":
                     intbox = list(map(int, box))
                     crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
                     # crop = cv2.resize(crop, (256, 256))
@@ -522,7 +518,7 @@ class VideoProcessor:
                 det = np.asarray(np.insert(det, 6, feat))
                 detections.append(det)
         targets = self._tracker.update(
-            np.asarray(detections), self.param.with_feature, self.param.config.matcher
+            np.asarray(detections), self.param.with_feature, self.param.matcher
         )
         track_tlwhs = []
         track_ids = []
@@ -569,15 +565,18 @@ class VideoProcessor:
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
             is_included, raw_img = self.filter_box(box, raw_img)
             if is_included:
-                # x_feat = np.array(feat).flatten()
-                intbox = list(map(int, box))
-                crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
-                # crop = cv2.resize(crop, (256, 256))
-                # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                # feat = np.array(gray).flatten()
-                feat = self.param.extractor([crop]).flatten()
-                # shape = min(feat.shape)
-                # feat = np.resize(feat, (shape, shape)).flatten()
+                if self.param.matcher is None:
+                    feat = np.array(feat).flatten()
+                elif self.param.matcher == "COSINE_SL":
+                    # x_feat = np.array(feat).flatten()
+                    intbox = list(map(int, box))
+                    crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
+                    # crop = cv2.resize(crop, (256, 256))
+                    # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    # feat = np.array(gray).flatten()
+                    feat = self.param.extractor([crop]).flatten()
+                    # shape = min(feat.shape)
+                    # feat = np.resize(feat, (shape, shape)).flatten()
                 det = detection.Detection(
                     np.array(box), score, class_names[int(label)], feat
                 )
@@ -659,7 +658,7 @@ class VideoProcessor:
                         predictions = self.predictor(frame)
                         predictions = predictions["instances"].to(torch.device("cpu"))
 
-                        if hooker and self.param.config.matcher is None:
+                        if hooker and self.param.matcher is None:
                             mask_pool = hooker.outputs[-1].cpu().numpy()
                             hooker.remove()
                         else:
@@ -668,7 +667,7 @@ class VideoProcessor:
                         feat_masks, _, boxes, scores, classes = self.det2_process(
                             predictions,
                             mask_pool,
-                            self.param.config.matcher,
+                            self.param.matcher,
                         )
 
                     else:
@@ -780,13 +779,14 @@ if __name__ == "__main__":
                 param.config.weight_file = "checkpoints/YOLOv7_Mask.pt"
             for tracker_name in ["DEEPSORT", "OCSORT", "DEEPOCSORT"]:
                 param.tracker_name = tracker_name.upper()
-                param.config.matcher = None
-                print(f"Processing... Tracker: {tracker_name}, Predictor: {predictor}")
-                start_process(param, is_yolo)
-                print()
-            is_yolo = False
+                for matcher in [None, "COSINE_SL"]:
+                    param.matcher = matcher
+                    print(
+                        f"Processing... Tracker: {param.tracker_name}, Predictor: {param.predictor_name}, Matcher: {param.matcher}"
+                    )
+                    start_process(param, is_yolo)
+                    print()
     else:
-        param = ParameterManager("configs/demo_config.yaml")
         param.predictor_name = param.config.predictor.upper()
         param.tracker_name = param.config.tracker.upper()
         if param.predictor_name == "YOLOV7":
