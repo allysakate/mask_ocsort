@@ -2,7 +2,7 @@
     This script is adopted from the SORT script by Alex Bewley alex@bewley.ai
 """
 from __future__ import print_function
-
+import math
 import numpy as np
 from .association import (
     iou_batch,
@@ -125,6 +125,7 @@ class KalmanBoxTracker(object):
         self.age = 0
         self.category = -1
         self.feature = np.array([0.01] * (length - 6))
+        self.norm_distance = 0
         """
         NOTE: [-1,-1,-1,-1,-1] is a compromising placeholder for non-observation status, the same for the return of
         function k_previous_obs. It is ugly and I do not like it. But to support generate observation array in a
@@ -240,7 +241,7 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, dets, with_feature=False, desc_matcher=None):
+    def update(self, dets, with_feature=False, desc_matcher=None, width=1920):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score,class],[x1,y1,x2,y2,score,class],...]
@@ -250,6 +251,7 @@ class OCSort(object):
         NOTE: The number of objects returned may differ from the number of detections provided.
         """
         length = dets.shape[1]
+        self.frame_count += 1
         # get predicted locations from existing trackers.
         trks = np.zeros((len(self.trackers), length))
         to_del = []
@@ -336,7 +338,16 @@ class OCSort(object):
             self.trackers.append(trk)
         i = len(self.trackers)
         for trk in reversed(self.trackers):
-            if trk.last_observation[:6].sum() < 0:
+            obs_keys = list(trk.observations.keys())
+            num_obs = len(obs_keys)
+            if num_obs > 1:
+                bbox1 = trk.observations[obs_keys[-2]][:4]
+                bbox2 = trk.observations[obs_keys[-1]][:4]
+                cx1, cy1 = (bbox1[0] + bbox1[2]) / 2.0, (bbox1[1] + bbox1[3]) / 2.0
+                cx2, cy2 = (bbox2[0] + bbox2[2]) / 2.0, (bbox2[1] + bbox2[3]) / 2.0
+                distance = math.sqrt((cy2 - cy1) ** 2 + (cx2 - cx1) ** 2)
+                trk.norm_distance = 1 - (width - distance) / width
+            if trk.last_observation[:4].sum() < 0:
                 d = trk.get_state()[0]
             else:
                 """
@@ -352,7 +363,11 @@ class OCSort(object):
                 ret.append(np.concatenate((result, [trk.id + 1])).reshape(1, -1))
             i -= 1
             # remove dead tracklet
-            if trk.time_since_update > self.max_age:
+            if trk.time_since_update > self.max_age or (
+                with_feature
+                and trk.time_since_update > self.max_age / 3
+                and trk.norm_distance > 0.2
+            ):
                 self.trackers.pop(i)
         if len(ret) > 0:
             return np.concatenate(ret)

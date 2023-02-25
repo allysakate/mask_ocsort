@@ -1,5 +1,6 @@
 import os
 import yaml
+import argparse
 from typing import List
 from functools import reduce
 import torch
@@ -46,7 +47,9 @@ class ParameterManager:
 
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
-        self.matcher = self.config.matcher.upper()
+        self.matcher = self.config.matcher
+        if self.matcher:
+            self.matcher = self.config.matcher.upper()
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.predictor_name = None
         self.tracker_name = None
@@ -493,6 +496,7 @@ class VideoProcessor:
         classes,
         results,
         class_names,
+        width,
     ):
         detections = []
         # cnt = 0
@@ -506,19 +510,16 @@ class VideoProcessor:
                 elif self.param.matcher == "COSINE_SL":
                     intbox = list(map(int, box))
                     crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
-                    # crop = cv2.resize(crop, (256, 256))
-                    # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    # feat = np.array(gray).flatten()
-                    feat = self.param.extractor([crop]).flatten()
-                    # cnt += 1
-                    # cv2.imwrite(f"cropped/{frame_id}_{cnt}.jpg", crop)
-                # feat = np.array(feat)
-                # shape = min(feat.shape)
-                # feat = np.resize(feat, (shape, shape)).flatten()
-                det = np.asarray(np.insert(det, 6, feat))
-                detections.append(det)
+                    is_crop = any(v == 0 for v in crop.shape)
+                    if is_crop:
+                        is_included = False
+                    else:
+                        feat = self.param.extractor([crop]).flatten()
+                if is_included:
+                    det = np.asarray(np.insert(det, 6, feat))
+                    detections.append(det)
         targets = self._tracker.update(
-            np.asarray(detections), self.param.with_feature, self.param.matcher
+            np.asarray(detections), self.param.with_feature, self.param.matcher, width
         )
         track_tlwhs = []
         track_ids = []
@@ -574,13 +575,18 @@ class VideoProcessor:
                     # crop = cv2.resize(crop, (256, 256))
                     # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                     # feat = np.array(gray).flatten()
-                    feat = self.param.extractor([crop]).flatten()
+                    is_crop = any(v == 0 for v in crop.shape)
+                    if is_crop:
+                        is_included = False
+                    else:
+                        feat = self.param.extractor([crop]).flatten()
                     # shape = min(feat.shape)
                     # feat = np.resize(feat, (shape, shape)).flatten()
-                det = detection.Detection(
-                    np.array(box), score, class_names[int(label)], feat
-                )
-                detections.append(det)
+                if is_included:
+                    det = detection.Detection(
+                        np.array(box), score, class_names[int(label)], feat
+                    )
+                    detections.append(det)
         self._tracker.predict()
         self._tracker.update(detections)
         track_tlwhs = []
@@ -712,6 +718,7 @@ class VideoProcessor:
                                 classes,
                                 results,
                                 self.class_names,
+                                width,
                             )
                         timer.toc()
                         res_image = self.plot_tracking(
@@ -757,10 +764,12 @@ def start_process(param, is_yolo=False):
 
 
 if __name__ == "__main__":
-    batch = True
-    param = ParameterManager("configs/demo_config.yaml")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch", action="store_true", help="if batch ")
+    args = parser.parse_args()
     is_yolo = False
-    if batch:
+    param = ParameterManager("configs/demo_config.yaml")
+    if args.batch:
         for predictor in ["SOLOv2", "MaskRCNN", "YOLOv7"]:
             param.predictor_name = predictor.upper()
             param.config.predictor = param.predictor_name
@@ -786,6 +795,7 @@ if __name__ == "__main__":
                     )
                     start_process(param, is_yolo)
                     print()
+            is_yolo = False
     else:
         param.predictor_name = param.config.predictor.upper()
         param.tracker_name = param.config.tracker.upper()
