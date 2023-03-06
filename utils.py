@@ -108,17 +108,16 @@ def get_config(yml_file: str):
     return model_cfg
 
 
-def initiate_logging(script: str):
+def initiate_logging(log_dir: str, script: str):
     """Creates log file for script
     Arguments:
         log_name (str):  name of log file
     Return:
         logging (object):  logging object
     """
-    log_dir = "logs/"
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
-    now = datetime.now().strftime("%m%d%Y")  # current date and time
+    now = datetime.now().strftime("%m%d%Y%H%M%S")  # current date and time
     log_name = os.path.join(log_dir, f"{script}_{now}.log")
 
     logger = logging.getLogger()
@@ -141,6 +140,13 @@ def initiate_logging(script: str):
     # start logging and show messages
     logger.info("---------------START---------------")
     return logger
+
+
+def close_logging(logger):
+    handlers = logger.handlers[:]
+    for handler in handlers:
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def create_output(dir_path: str, base_name: str = None):

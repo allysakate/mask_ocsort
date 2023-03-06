@@ -2,7 +2,6 @@
     This script is adopted from the SORT script by Alex Bewley alex@bewley.ai
 """
 from __future__ import print_function
-import math
 import numpy as np
 from .association import (
     iou_batch,
@@ -12,6 +11,7 @@ from .association import (
     ct_dist,
     associate,
     linear_assignment,
+    iou,
 )
 
 
@@ -63,7 +63,23 @@ def speed_direction(bbox1, bbox2):
     cx2, cy2 = (bbox2[0] + bbox2[2]) / 2.0, (bbox2[1] + bbox2[3]) / 2.0
     speed = np.array([cy2 - cy1, cx2 - cx1])
     norm = np.sqrt((cy2 - cy1) ** 2 + (cx2 - cx1) ** 2) + 1e-6
-    return speed / norm
+    return speed / norm, norm
+
+
+def distance_quadrant(bbox1, bbox2):
+    speed_xy, distance = speed_direction(bbox1, bbox2)
+    cnt_positive = np.sum(np.array(speed_xy) >= 0)
+    print(speed_xy, distance, cnt_positive)
+    if cnt_positive == 2:
+        quadrant = 1
+    elif cnt_positive == 1:
+        if speed_xy[0] > 0:
+            quadrant = 4
+        else:
+            quadrant = 2
+    elif cnt_positive == 0:
+        quadrant = 3
+    return distance, quadrant
 
 
 class KalmanBoxTracker(object):
@@ -108,9 +124,8 @@ class KalmanBoxTracker(object):
         )
 
         self.kf.R[2:, 2:] *= 10.0
-        self.kf.P[
-            4:, 4:
-        ] *= 1000.0  # give high uncertainty to the unobservable initial velocities
+        # give high uncertainty to the unobservable initial velocities
+        self.kf.P[4:, 4:] *= 1000.0
         self.kf.P *= 10.0
         self.kf.Q[-1, -1] *= 0.01
         self.kf.Q[4:, 4:] *= 0.01
@@ -124,8 +139,11 @@ class KalmanBoxTracker(object):
         self.hit_streak = 0
         self.age = 0
         self.category = -1
+        # bbox[4], score, category
         self.feature = np.array([0.01] * (length - 6))
-        self.norm_distance = 0
+        self.distances = []
+        self.quadrants = []
+        self.is_drop = False
         """
         NOTE: [-1,-1,-1,-1,-1] is a compromising placeholder for non-observation status, the same for the return of
         function k_previous_obs. It is ugly and I do not like it. But to support generate observation array in a
@@ -142,7 +160,7 @@ class KalmanBoxTracker(object):
         Updates the state vector with observed bbox.
         """
         if bbox is not None:
-            if self.last_observation[:6].sum() >= 0:  # no previous observation
+            if self.last_observation[:5].sum() >= 0:  # no previous observation
                 previous_box = None
                 for i in range(self.delta_t):
                     dt = self.delta_t - i
@@ -155,7 +173,7 @@ class KalmanBoxTracker(object):
                   Estimate the track speed direction with observations
                   divided by Delta t steps away
                 """
-                self.velocity = speed_direction(previous_box, bbox)
+                self.velocity, _ = speed_direction(previous_box, bbox)
 
             """
               Insert new observations. This is a ugly way to maintain both self.observations
@@ -259,7 +277,7 @@ class OCSort(object):
         for t, trk in enumerate(trks):
             pos = self.trackers[t].predict()[0]
             pos_holder = [0] * length
-            pos_holder[:4] = [pos[0], pos[1], pos[2], pos[3]]
+            pos_holder[:4] = [pos[0], pos[1], pos[2], pos[3], 0, 0]
             pos_holder[6:] = self.trackers[t].feature
             trk[:] = pos_holder
             if np.any(np.isnan(pos)):
@@ -331,22 +349,25 @@ class OCSort(object):
             self.trackers[m].update(None)
 
         # create and initialise new trackers for unmatched detections
-        for i in unmatched_dets:
-            trk = KalmanBoxTracker(dets[i, :], delta_t=self.delta_t, length=length)
-            trk.category = dets[i, 5]
-            trk.feature = dets[i, 6:]
-            self.trackers.append(trk)
+        trk_dets = []
         i = len(self.trackers)
         for trk in reversed(self.trackers):
-            obs_keys = list(trk.observations.keys())
-            num_obs = len(obs_keys)
-            if num_obs > 1:
-                bbox1 = trk.observations[obs_keys[-2]][:4]
-                bbox2 = trk.observations[obs_keys[-1]][:4]
-                cx1, cy1 = (bbox1[0] + bbox1[2]) / 2.0, (bbox1[1] + bbox1[3]) / 2.0
-                cx2, cy2 = (bbox2[0] + bbox2[2]) / 2.0, (bbox2[1] + bbox2[3]) / 2.0
-                distance = math.sqrt((cy2 - cy1) ** 2 + (cx2 - cx1) ** 2)
-                trk.norm_distance = 1 - (width - distance) / width
+            # obs_keys = list(trk.observations.keys())
+            # num_obs = len(obs_keys)
+            # if num_obs > 1:
+            # bbox1 = trk.observations[obs_keys[-2]][:4]
+            # bbox2 = trk.observations[obs_keys[-1]][:4]
+            # distance, quad =  distance_quadrant(bbox1, bbox2)
+            # norm_distance = (distance/num_obs)/width
+            # if num_obs < self.min_hits:
+            #     trk.quadrants.append(quad)
+            #     trk.distances.append(distance)
+            # if norm_distance >= 0.1:
+            #     max_dst_idx = trk.distances.index(max(trk.distances))
+            #     max_dst_quad = trk.quadrants[max_dst_idx]
+            #     rpt_quad = max(trk.quadrants,key=trk.quadrants.count)
+            #     if max_dst_quad != quad and rpt_quad != quad:
+            #         trk.is_drop = True
             if trk.last_observation[:4].sum() < 0:
                 d = trk.get_state()[0]
             else:
@@ -358,7 +379,9 @@ class OCSort(object):
             if (trk.time_since_update < 1) and (
                 trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits
             ):
+                # ) and not trk.is_drop:
                 # +1 as MOT benchmark requires positive
+                trk_dets.append(d)
                 result = np.insert(d, 4, trk.category)
                 ret.append(np.concatenate((result, [trk.id + 1])).reshape(1, -1))
             i -= 1
@@ -366,9 +389,24 @@ class OCSort(object):
             if trk.time_since_update > self.max_age or (
                 with_feature
                 and trk.time_since_update > self.max_age / 3
-                and trk.norm_distance > 0.2
+                and trk.is_drop
             ):
                 self.trackers.pop(i)
+
+        trk_dets = np.array(trk_dets)
+        for i in unmatched_dets:
+            is_new = True
+            if trk_dets.any() and with_feature:
+                ious = iou(dets[i, :4], trk_dets)
+                filter_ious = np.sort(ious[ious >= 0.98])
+                if filter_ious.any():
+                    is_new = False
+            if is_new:
+                trk = KalmanBoxTracker(dets[i, :], delta_t=self.delta_t, length=length)
+                trk.category = dets[i, 5]
+                trk.feature = dets[i, 6:]
+                self.trackers.append(trk)
+
         if len(ret) > 0:
             return np.concatenate(ret)
         return np.empty((0, length))
