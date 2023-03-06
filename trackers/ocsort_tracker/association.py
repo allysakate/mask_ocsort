@@ -297,7 +297,7 @@ def compute_cost(iou_matrix, feat_matrix, pos_matrix):
     if feat_matrix is None:
         cost_matrix = iou_matrix
     else:
-        if pos_matrix.any():
+        if pos_matrix is not None:
             cost_matrix = np.add(
                 iou_matrix * 0.5, feat_matrix * 0.25, pos_matrix * 0.25
             )

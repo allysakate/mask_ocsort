@@ -498,11 +498,32 @@ class VideoProcessor:
                 )
         return is_included, frame
 
+    def mask2polygon(self, image, masks):
+        masks = masks.numpy()
+        image_copy = image.copy()
+        image_mask = np.zeros(image.shape, dtype=np.uint8)
+        for i in range(3):
+            image_mask[:, :, i] = masks.astype(int)
+        image_mask[image_mask == 1] = 255
+        result = cv2.bitwise_and(image_copy, image_mask)
+        # contours, _ = cv2.findContours(image=mask_reformed,mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)
+        # # or you can also method=cv2.CHAIN_APPROX_NONE
+        # # check the contours
+        # # Mask input image with binary mask
+        # result = cv2.bitwise_and(image, mask_reformed)
+        # # Color background white
+        # result[mask_reformed==0] = 255 # Optional
+        # cv2.fillPoly(result, pts=[contours], color=(255, 0, 0))
+        cv2.imshow("result", result)
+        cv2.waitKey()
+        return result
+
     def ocsort(
         self,
         raw_img,
         frame_id,
         feat_masks,
+        seg_masks,
         boxes,
         scores,
         classes,
@@ -513,8 +534,10 @@ class VideoProcessor:
     ):
         detections = []
         # cnt = 0
-        for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-            is_included, raw_img = self.filter_box(box, raw_img)
+        for feat, mask, box, score, label in zip(
+            feat_masks, seg_masks, boxes, scores, classes
+        ):
+            is_included, _ = self.filter_box(box)
             if is_included:
                 intbox = list(map(int, box))
                 det_results.append(
@@ -525,6 +548,7 @@ class VideoProcessor:
                 if self.param.matcher is None:
                     feat = np.array(feat).flatten()
                 elif self.param.matcher == "COSINESL":
+                    # new_image = self.mask2polygon(raw_img, mask)
                     crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
                     is_crop = any(v == 0 for v in crop.shape)
                     if is_crop:
@@ -566,7 +590,7 @@ class VideoProcessor:
                     f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
                 )
 
-        return track_tlwhs, track_ids, track_classes, trk_results, det_results, raw_img
+        return track_tlwhs, track_ids, track_classes, trk_results, det_results
 
     def deepsort(
         self,
@@ -582,7 +606,7 @@ class VideoProcessor:
     ):
         detections = []
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-            is_included, raw_img = self.filter_box(box, raw_img)
+            is_included, _ = self.filter_box(box)
             if is_included:
                 # class_name = class_names[int(label)]
                 intbox = list(map(int, box))
@@ -632,7 +656,7 @@ class VideoProcessor:
                 trk_results.append(
                     f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
                 )
-        return track_tlwhs, track_ids, track_classes, trk_results, det_results, raw_img
+        return track_tlwhs, track_ids, track_classes, trk_results, det_results
 
     def process(self, is_yolo):
         width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -676,6 +700,7 @@ class VideoProcessor:
             ret_val, frame = self.video.read()
             if ret_val:
                 raw_img = frame
+                frame_copy = frame.copy()
                 det_results = []
                 timer.tic()
                 if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
@@ -691,7 +716,13 @@ class VideoProcessor:
                         else:
                             mask_pool = None
 
-                        feat_masks, _, boxes, scores, classes = self.det2_process(
+                        (
+                            feat_masks,
+                            seg_masks,
+                            boxes,
+                            scores,
+                            classes,
+                        ) = self.det2_process(
                             predictions,
                             mask_pool,
                             self.param.matcher,
@@ -701,7 +732,13 @@ class VideoProcessor:
                         frame = self.set_frame(frame)
                         _, _, f_height, f_width = frame.shape
                         predictions = self.predictor(frame)
-                        feat_masks, _, boxes, scores, classes = self.yolo_process(
+                        (
+                            feat_masks,
+                            seg_masks,
+                            boxes,
+                            scores,
+                            classes,
+                        ) = self.yolo_process(
                             predictions, (f_height, f_width), (height, width)
                         )
                     if boxes.any():
@@ -713,9 +750,8 @@ class VideoProcessor:
                                 track_classes,
                                 trk_results,
                                 det_results,
-                                raw_img,
                             ) = self.deepsort(
-                                raw_img,
+                                frame_copy,
                                 frame_id,
                                 feat_masks,
                                 boxes,
@@ -732,11 +768,11 @@ class VideoProcessor:
                                 track_classes,
                                 trk_results,
                                 det_results,
-                                raw_img,
                             ) = self.ocsort(
-                                raw_img,
+                                frame_copy,
                                 frame_id,
                                 feat_masks,
+                                seg_masks,
                                 boxes,
                                 scores,
                                 classes,
