@@ -1,9 +1,121 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models
 import torchvision.transforms as transforms
-import numpy as np
 import cv2
+import numpy as np
+from PIL import Image
+
+
+model_names = sorted(
+    name
+    for name in models.__dict__
+    if name.islower() and not name.startswith("__") and callable(models.__dict__[name])
+)
+
+
+def load_model(model, model_file):
+    checkpoint = torch.load(model_file)
+    # Support for checkpoints saved by scripts based off of
+    #   https://github.com/pytorch/examples/blob/master/imagenet/main.py
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        checkpoint = checkpoint["state_dict"]
+    model.load_state_dict(checkpoint, strict=False)
+
+
+class AlexNetPartial(nn.Module):
+    supported_layers = [
+        "conv1",
+        "conv2",
+        "conv3",
+        "conv4",
+        "conv5",
+        "fc6",
+        "relu6",
+        "fc7",
+        "fc8",
+    ]
+
+    def __init__(self, layer, model_file=None, data_parallel=False, **kwargs):
+        super(AlexNetPartial, self).__init__()
+        assert layer in AlexNetPartial.supported_layers
+        self.model = models.alexnet(**kwargs)
+
+        self.output_layer = layer
+
+        if "conv" in self.output_layer:
+            # Map, e.g., 'conv2' to corresponding index into self.features
+            conv_map = {}
+            conv_index = 1
+            for i, layer in enumerate(self.model.features):
+                if isinstance(layer, nn.Conv2d):
+                    conv_map["conv%s" % conv_index] = i
+                    conv_index += 1
+            requested_index = conv_map[self.output_layer]
+            features = list(self.model.features.children())[: requested_index + 1]
+            self.model.features = nn.Sequential(*features)
+        else:
+            classifier_map = {"fc6": 1, "relu6": 2, "fc7": 4, "relu7": 5, "fc8": 6}
+            requested_index = classifier_map[self.output_layer]
+            classifier = list(self.model.classifier.children())[: requested_index + 1]
+            self.model.classifier = nn.Sequential(*classifier)
+        if data_parallel:
+            self.model.features = torch.nn.DataParallel(self.model.features)
+        if model_file is not None:
+            load_model(self.model, model_file)
+
+    def forward(self, x):
+        x = self.model.features(x)
+        if "conv" in self.output_layer:
+            return x
+        x = x.view(x.size(0), 256 * 6 * 6)
+        x = self.model.classifier(x)
+        return x
+
+
+# https://ieeexplore-ieee-org.dlsu.idm.oclc.org/stamp/stamp.jsp?tp=&arnumber=9606052&tag=1
+class FeatExtractor:
+    def __init__(self, arch_layer="alexnet-fc7", use_cuda=True):
+        partial_models = {
+            "alexnet": AlexNetPartial,
+        }
+        arch_layer = "alexnet-fc7"
+        architecture, layer = arch_layer.split("-")
+
+        construction_kwargs = {
+            "layer": layer,
+            "pretrained": True,
+            "model_file": None,
+            "data_parallel": True,
+        }
+        if architecture.startswith("densenet") or architecture.startswith("vgg"):
+            construction_kwargs["architecture"] = architecture
+        self.model = partial_models[architecture](**construction_kwargs)
+        self.model.cuda()
+        self.model.eval()
+
+    def _preprocess(self, im_crops):
+        transform_image = transforms.Compose(
+            [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
+        color_converted = cv2.cvtColor(im_crops, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(color_converted)
+        return transform_image(pil_image).unsqueeze(0)
+
+    def __call__(self, im_crops):
+        im_batch = self._preprocess(im_crops)
+        with torch.no_grad():
+            input_var = torch.autograd.Variable(im_batch).cuda()
+            features = self.model(input_var).data.cpu().numpy()[0]
+        return features
 
 
 class BasicBlock(nn.Module):

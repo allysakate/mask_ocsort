@@ -302,7 +302,7 @@ def compute_cost(iou_matrix, feat_matrix, pos_matrix):
                 iou_matrix * 0.5, feat_matrix * 0.25, pos_matrix * 0.25
             )
         else:
-            cost_matrix = np.add(iou_matrix * 0.65, feat_matrix * 0.35)
+            cost_matrix = np.add(iou_matrix * 0.7, feat_matrix * 0.3)
     # max_m = cost_matrix.argmax(axis=1)
     # max_v = np.amax(cost_matrix, axis=1)
     return cost_matrix

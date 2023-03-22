@@ -1,12 +1,12 @@
-tracker : DEEPOCSORT
+tracker : OCSORT
 # MaskRCNN SOLOv2 YOLOv7
-predictor : MaskRCNN
+predictor : YOLOv7
 # AKAZE_BF AKAZE_FLANN BRISK_BF BRISK_FLANN ORB_BF ORB_FLANN COSINESL
-matcher : COSINESL
+matcher :
 # configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml configs/YOLOv7_Mask.yaml
-config_file : configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml
+config_file : configs/YOLOv7_Mask.yaml
 # checkpoints/SOLOv2_R50_3x.pth checkpoints/MaskRCNN_R50_3x.pkl checkpoints/YOLOv7_Mask.pt
-weight_file : checkpoints/MaskRCNN_R50_3x.pkl
+weight_file : checkpoints/YOLOv7_Mask.pt
 is_save_result : True
 frame_use : 1
 video_path : /media/catchall/MyPassport/DATASET/apmc_ch08_20190804170000-1/apmc_ch08_20190804170000-1.mp4

@@ -398,7 +398,7 @@ class OCSort(object):
             is_new = True
             if trk_dets.any() and with_feature:
                 ious = iou(dets[i, :4], trk_dets)
-                filter_ious = np.sort(ious[ious >= 0.98])
+                filter_ious = np.sort(ious[ious >= 0.97])
                 if filter_ious.any():
                     is_new = False
             if is_new:

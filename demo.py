@@ -18,7 +18,7 @@ from detectron2.layers import paste_masks_in_image
 from models.config import get_cfg
 from models.utils.datasets import letterbox
 from models.utils.general import non_max_suppression_mask_conf
-from models.feature_extractor import Extractor
+from models.feature_extractor import FeatExtractor
 from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
@@ -155,9 +155,8 @@ class VideoProcessor:
                 use_cuda = True
             else:
                 use_cuda = False
-            self.extractor = Extractor(
-                "checkpoints/CosineMetric_Learning.t7", use_cuda=use_cuda
-            )
+            # Extractor: "checkpoints/CosineMetric_Learning.t7", use_cuda=use_cuda
+            self.extractor = FeatExtractor("alexnet-fc7", use_cuda=use_cuda)
         log_dir = create_output(param.config.det_dir, f"{param.tracker_name}/logs")
         self.logger = initiate_logging(log_dir, param.text_filename)
 
@@ -538,23 +537,32 @@ class VideoProcessor:
             feat_masks, seg_masks, boxes, scores, classes
         ):
             is_included, _ = self.filter_box(box)
-            if is_included:
+            if is_included and int(label) in self.param.config.class_list:
+                # class_name = class_names[int(label)]
                 intbox = list(map(int, box))
                 det_results.append(
                     f"car {float(score)} {intbox[0]} {intbox[1]} {intbox[2]-intbox[0]} {intbox[3]-intbox[1]}\n"
                 )
                 det = np.insert(box, 4, score)
                 det = np.insert(det, 5, label)
-                if self.param.matcher is None:
+                if self.param.matcher is None and self.param.with_feature:
+                    if self.param.predictor_name == "SOLOV2":
+                        max_pool = nn.MaxPool1d(3, stride=12)
+                        feat = max_pool(feat).numpy()
+                    elif self.param.predictor_name == "MASKRCNN":
+                        max_pool = nn.MaxPool2d(3, stride=3)
+                        feat = max_pool(feat).numpy()
                     feat = np.array(feat).flatten()
-                elif self.param.matcher == "COSINESL":
+                elif self.param.matcher == "COSINESL" and self.param.with_feature:
                     # new_image = self.mask2polygon(raw_img, mask)
                     crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
                     is_crop = any(v == 0 for v in crop.shape)
                     if is_crop:
                         is_included = False
                     else:
-                        feat = self.extractor([crop]).flatten()
+                        feat = self.extractor(crop)
+                else:
+                    feat = np.array(feat).flatten()
                 if is_included:
                     det = np.asarray(np.insert(det, 6, feat))
                     detections.append(det)
@@ -607,7 +615,7 @@ class VideoProcessor:
         detections = []
         for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
             is_included, _ = self.filter_box(box)
-            if is_included:
+            if is_included and int(label) in self.param.config.class_list:
                 # class_name = class_names[int(label)]
                 intbox = list(map(int, box))
                 det_results.append(
@@ -625,7 +633,7 @@ class VideoProcessor:
                     if is_crop:
                         is_included = False
                     else:
-                        feat = self.extractor([crop]).flatten()
+                        feat = self.extractor(crop)
                     # shape = min(feat.shape)
                     # feat = np.resize(feat, (shape, shape)).flatten()
                 if is_included:
@@ -682,6 +690,8 @@ class VideoProcessor:
         else:
             self._tracker = OCSort()
         timer = Timer()
+        det_timer = Timer()
+        trk_timer = Timer()
         frame_id = 0
         trk_results = []
 
@@ -704,6 +714,7 @@ class VideoProcessor:
                 det_results = []
                 timer.tic()
                 if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
+                    det_timer.tic()
                     hooker = self.set_hooker()
 
                     if not is_yolo:
@@ -711,7 +722,7 @@ class VideoProcessor:
                         predictions = predictions["instances"].to(torch.device("cpu"))
 
                         if hooker and self.param.matcher is None:
-                            mask_pool = hooker.outputs[-1].cpu().numpy()
+                            mask_pool = hooker.outputs[-1].cpu()
                             hooker.remove()
                         else:
                             mask_pool = None
@@ -741,6 +752,8 @@ class VideoProcessor:
                         ) = self.yolo_process(
                             predictions, (f_height, f_width), (height, width)
                         )
+                    det_timer.toc()
+                    trk_timer.tic()
                     if boxes.any():
                         # TODO: tracking
                         if not self.param.use_ocsort:
@@ -781,6 +794,7 @@ class VideoProcessor:
                                 self.class_names,
                                 width,
                             )
+                        trk_timer.toc()
                         timer.toc()
                         res_image = self.plot_tracking(
                             raw_img,
@@ -808,6 +822,9 @@ class VideoProcessor:
                 timer.toc()
                 self.logger.info(f"Average Time: {timer.average_time}")
                 self.logger.info(f"Total Time: {timer.total_time}")
+                self.logger.info(
+                    f"Time: {det_timer.total_time}, {det_timer.average_time}, {trk_timer.total_time}, {trk_timer.average_time}, {timer.total_time}, {timer.average_time}"
+                )
                 break
             frame_id += 1
 
@@ -838,7 +855,7 @@ if __name__ == "__main__":
     is_yolo = False
     param = ParameterManager("configs/demo_config.yaml")
     if args.batch:
-        for frame_use in [1, 5, 10, 25]:
+        for frame_use in [1, 5, 25]:
             param.frame_use = frame_use
             for predictor in ["MaskRCNN", "SOLOV2", "YOLOV7"]:
                 param.predictor_name = predictor.upper()
@@ -860,9 +877,13 @@ if __name__ == "__main__":
                     is_yolo = True
                     param.config.config_file = "configs/YOLOv7_Mask.yaml"
                     param.config.weight_file = "checkpoints/YOLOv7_Mask.pt"
-                for tracker_name in ["OCSORT", "DEEPOCSORT"]:
+                for tracker_name in ["DEEPSORT", "OCSORT", "DEEPOCSORT"]:
                     param.tracker_name = tracker_name.upper()
-                    for matcher in [None, "COSINESL"]:
+                    if tracker_name == "DEEPOCSORT":
+                        matchers = [None, "COSINESL"]
+                    else:
+                        matchers = ["COSINESL"]
+                    for matcher in matchers:
                         param.matcher = matcher
                         print(
                             f"Processing... Tracker: {param.tracker_name}, Predictor: {param.predictor_name}, Matcher: {param.matcher} Frame Use: {param.frame_use}"
