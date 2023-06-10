@@ -243,7 +243,9 @@ class OCSort(object):
         delta_t=3,
         asso_func="iou",
         inertia=0.2,
+        iou_weight=0.7,
         use_byte=False,
+        out_folder=None,
     ):
         """
         Sets key parameters for SORT
@@ -256,10 +258,12 @@ class OCSort(object):
         self.delta_t = delta_t
         self.asso_func = ASSO_FUNCS[asso_func]
         self.inertia = inertia
+        self.iou_weight = iou_weight
+        self.out_folder = out_folder
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, dets, with_feature=False, desc_matcher=None, width=1920):
+    def update(self, data, frame_id, raw_img, dets, with_feature=False, desc_matcher=None, width=1920):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score,class],[x1,y1,x2,y2,score,class],...]
@@ -268,6 +272,7 @@ class OCSort(object):
         Returns the a similar array, where the last column is the object ID.
         NOTE: The number of objects returned may differ from the number of detections provided.
         """
+        img = raw_img.copy()
         length = dets.shape[1]
         self.frame_count += 1
         # get predicted locations from existing trackers.
@@ -300,16 +305,19 @@ class OCSort(object):
             ]
         )
 
-        """
-            First round of association
-        """
-        matched, unmatched_dets, unmatched_trks = associate(
+        # First round of association
+        assoc_img, data, matched, unmatched_dets, unmatched_trks = associate(
+            data,
+            frame_id,
+            img,
             dets,
             trks,
             self.iou_threshold,
             velocities,
             k_observations,
             self.inertia,
+            self.iou_weight,
+            self.out_folder,
             length,
             with_feature,
             desc_matcher,
@@ -386,11 +394,12 @@ class OCSort(object):
                 ret.append(np.concatenate((result, [trk.id + 1])).reshape(1, -1))
             i -= 1
             # remove dead tracklet
-            if trk.time_since_update > self.max_age or (
-                with_feature
-                and trk.time_since_update > self.max_age / 3
-                and trk.is_drop
-            ):
+            if trk.time_since_update > self.max_age:
+            # if trk.time_since_update > self.max_age or (
+            #     with_feature
+            #     and trk.time_since_update > self.max_age / 3
+            #     and trk.is_drop
+            # ):
                 self.trackers.pop(i)
 
         trk_dets = np.array(trk_dets)
@@ -408,5 +417,5 @@ class OCSort(object):
                 self.trackers.append(trk)
 
         if len(ret) > 0:
-            return np.concatenate(ret)
-        return np.empty((0, length))
+            return assoc_img, data, np.concatenate(ret)
+        return assoc_img, data, np.empty((0, length))

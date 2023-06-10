@@ -1,7 +1,93 @@
+import os
+import cv2
 import torch
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from .features import AKAZE, ORB, BRISK, features, matcher
+
+
+colors_instance = [
+    (128, 0, 0),
+    (0, 128, 0),
+    (128, 128, 0),
+    (0, 0, 128),
+    (128, 0, 128),
+    (0, 128, 128),
+    (64, 0, 0),
+    (192, 0, 0),
+    (64, 128, 0),
+    (192, 128, 0),
+    (64, 0, 128),
+    (192, 0, 128),
+    (64, 128, 128),
+    (192, 128, 128),
+    (0, 64, 0),
+    (128, 64, 0),
+    (0, 192, 0),
+    (128, 192, 0),
+    (0, 64, 128),
+    (50, 0, 0),
+    (100, 0, 0),
+    (50, 128, 0),
+    (100, 128, 0),
+    (50, 0, 128),
+    (100, 0, 128),
+    (50, 128, 128),
+    (100, 128, 128),
+    (0, 50, 0),
+    (128, 50, 0),
+    (0, 100, 0),
+    (128, 100, 0),
+    (0, 50, 128),
+    (85, 0, 0),
+    (170, 0, 0),
+    (85, 128, 0),
+    (170, 128, 0),
+    (85, 0, 128),
+    (170, 0, 128),
+    (85, 128, 128),
+    (170, 128, 128),
+    (0, 85, 0),
+    (128, 85, 0),
+    (0, 170, 0),
+    (128, 170, 0),
+    (0, 85, 128),
+    (36, 0, 0),
+    (70, 0, 0),
+    (36, 128, 0),
+    (70, 128, 0),
+    (36, 0, 128),
+    (70, 0, 128),
+    (36, 128, 128),
+    (70, 128, 128),
+    (0, 36, 0),
+    (128, 36, 0),
+    (0, 70, 0),
+    (128, 70, 0),
+    (0, 36, 128),
+    (28, 0, 0),
+    (151, 0, 0),
+    (28, 128, 0),
+    (151, 128, 0),
+    (28, 0, 128),
+    (151, 0, 128),
+    (28, 128, 128),
+    (151, 128, 128),
+    (0, 28, 0),
+    (128, 28, 0),
+    (0, 151, 0),
+    (128, 151, 0),
+    (0, 28, 128),
+    (168, 0, 0),
+    (222, 0, 0),
+    (168, 128, 0),
+    (222, 128, 0),
+    (168, 0, 128),
+    (222, 0, 128),
+    (168, 128, 128),
+    (222, 128, 128),
+    (0, 222, 0),
+]
 
 
 def iou(bbox, candidates):
@@ -293,7 +379,7 @@ def linear_assignment(cost_matrix):
     return np.array(list(zip(x, y)))
 
 
-def compute_cost(iou_matrix, feat_matrix, pos_matrix):
+def compute_cost(iou_matrix, feat_matrix, pos_matrix, iou_weight):
     if feat_matrix is None:
         cost_matrix = iou_matrix
     else:
@@ -302,19 +388,24 @@ def compute_cost(iou_matrix, feat_matrix, pos_matrix):
                 iou_matrix * 0.5, feat_matrix * 0.25, pos_matrix * 0.25
             )
         else:
-            cost_matrix = np.add(iou_matrix * 0.7, feat_matrix * 0.3)
+            cost_matrix = np.add(iou_matrix * iou_weight, feat_matrix * (1-iou_weight))
     # max_m = cost_matrix.argmax(axis=1)
     # max_v = np.amax(cost_matrix, axis=1)
     return cost_matrix
 
 
 def associate(
+    data,
+    frame_id,
+    image,
     detections,
     trackers,
     iou_threshold,
     velocities,
     previous_obs,
     vdc_weight,
+    iou_weight,
+    out_folder,
     length,
     with_feature=False,
     desc_matcher=None,
@@ -322,11 +413,7 @@ def associate(
     pos_matrix=None,
 ):
     if len(trackers) == 0:
-        return (
-            np.empty((0, 2), dtype=int),
-            np.arange(len(detections)),
-            np.empty((0, length), dtype=int),
-        )
+        return image, data, np.empty((0, 2), dtype=int), np.arange(len(detections)), np.empty((0, length), dtype=int)
     Y, X = speed_direction_batch(detections, previous_obs)
     inertia_Y, inertia_X = velocities[:, 0], velocities[:, 1]
     inertia_Y = np.repeat(inertia_Y[:, np.newaxis], Y.shape[1], axis=1)
@@ -342,20 +429,75 @@ def associate(
     iou_matrix = iou_batch(detections, trackers)
     if with_feature:
         if desc_matcher in ["COSINESL", None]:
-            feat_matrix = cosine_batch(detections[:, 8:], trackers[:, 8:])
+            feat_matrix = cosine_batch(detections[:, 6:], trackers[:, 6:])
         else:
             feat_matrix = featmatch_batch(
-                detections[:, 8:], trackers[:, 8:], desc_matcher
+                detections[:, 6:], trackers[:, 6:], desc_matcher
             )
         # pos_matrix = 1 - 0.5 * (X + Y).T
-    cost_matrix = compute_cost(iou_matrix, feat_matrix, pos_matrix)
+    cost_matrix = compute_cost(iou_matrix, feat_matrix, pos_matrix, iou_weight)
     scores = np.repeat(detections[:, -1][:, np.newaxis], trackers.shape[0], axis=1)
     # iou_matrix = iou_matrix * scores # a trick sometiems works, we don't encourage this
     valid_mask = np.repeat(valid_mask[:, np.newaxis], X.shape[1], axis=1)
 
     angle_diff_cost = (valid_mask * diff_angle) * vdc_weight
     angle_diff_cost = angle_diff_cost.T
+    angle_diff_weight = (valid_mask * diff_angle).T
     angle_diff_cost = angle_diff_cost * scores
+
+    img = image.copy()
+    for idx, det in enumerate(detections):
+        _idx = idx + 1
+        t_color = colors_instance[_idx]
+        det_bbox = det[:4]
+        intbox = list(map(int, det_bbox))
+        cv2.rectangle(img, intbox[0:2], intbox[2:4], color=t_color, thickness=3)
+        trk_count = 0
+        txt_count = 0
+        gamma2 = 0.2
+        gamma1 = 0.7
+        cost_row = cost_matrix[idx]
+        iou_row = iou_matrix[idx]
+        cos_row = feat_matrix[idx]
+        angle_row = angle_diff_weight[idx]
+        iou_idx = np.argmax(iou_row)
+        cos_idx = np.argmax(cos_row)
+        for iou, cos, ang, ic in zip(iou_row, cos_row, angle_row, cost_row):
+            ang_gamma = ang * gamma2
+            cost_gamma = gamma1*iou + (1-gamma1)*cos
+            if trk_count in [iou_idx, cos_idx]:
+                text_color = colors_instance[trk_count]
+            else: 
+                text_color = (0,0,0)
+            text = f"{trk_count}: I={iou:.2f}, C={cos:.2f}, A:{ang:.2f}, IC: {ic:.2f}"
+            data.append({
+                "frame_id": frame_id,
+                "det": idx,
+                "trk": trk_count,
+                "iou": iou,
+                "cos": cos,
+                "ang": ang,
+                "cost": ic,
+                "gamma1": cost_gamma,
+                "gamma2": ang_gamma,
+                "sum": cost_gamma + ang_gamma
+            })
+            if iou != 0.0 and cos !=0.0:
+                cv2.putText(
+                    img,
+                    text,
+                    (intbox[0], intbox[1]+12*(txt_count+1)),
+                    cv2.FONT_HERSHEY_PLAIN,
+                    1.2, # text_size,
+                    text_color,
+                    thickness=2,
+                )
+                txt_count += 1
+            trk_count += 1
+    iou_path = os.path.join(out_folder, f"{frame_id}.jpg")
+    if img.any():
+        cv2.imwrite(iou_path, img)
+
 
     if min(cost_matrix.shape) > 0:
         a = (cost_matrix > iou_threshold).astype(np.int32)
@@ -388,4 +530,4 @@ def associate(
     else:
         matches = np.concatenate(matches, axis=0)
 
-    return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
+    return img, data, matches, np.array(unmatched_detections), np.array(unmatched_trackers)

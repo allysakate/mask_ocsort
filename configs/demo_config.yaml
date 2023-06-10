@@ -1,21 +1,22 @@
-tracker : OCSORT
+tracker : MASKOCSORT
 # MaskRCNN SOLOv2 YOLOv7
-predictor : YOLOv7
+predictor : SOLOv2
 # AKAZE_BF AKAZE_FLANN BRISK_BF BRISK_FLANN ORB_BF ORB_FLANN COSINESL
 matcher :
 # configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml configs/YOLOv7_Mask.yaml
-config_file : configs/YOLOv7_Mask.yaml
+config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 # checkpoints/SOLOv2_R50_3x.pth checkpoints/MaskRCNN_R50_3x.pkl checkpoints/YOLOv7_Mask.pt
-weight_file : checkpoints/YOLOv7_Mask.pt
+weight_file : checkpoints/SOLOv2_R50_3x.pth
 is_save_result : True
 frame_use : 1
-video_path : /media/catchall/MyPassport/DATASET/apmc_ch08_20190804170000-1/apmc_ch08_20190804170000-1.mp4
-output_dir : /home/catchall/Documents/TrackEval/data/trackers/mot_challenge
-det_dir : /media/catchall/MyPassport/Dissertation/TestResults/Tracking
+video_path : /home/catchall/Videos/ch08af_20190804170000_2.mp4
+output_dir : /home/catchall/Documents/thesis/tracking/TrackEval/data/trackers/mot_challenge2
+det_dir : /home/catchall/Pictures/Tracking/video2
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
-class_list : [1, 2, 3, 5, 7]
+# class_list : [1, 2, 3, 5, 7]
+class_list : [2]
 # roi :
-roi : [885.80, 0.00, 1918.25, 200]  # 1
+roi : [1125.80, 0.00, 1918.25, 200]  # 1
 # roi : [883.99, 1.65, 1918.08, 241.23] #2
 confidence_threshold : 0.5
 iop_threshold : 0.1
@@ -23,3 +24,7 @@ track_thresh : 0.3
 iou_thresh : 0.3
 _aspect_ratio_thresh : 1.6
 _min_box_area_thresh : 10
+iou_weight : 0.3
+vd_weight : 0.2
+min_hits : 3
+max_age : 10

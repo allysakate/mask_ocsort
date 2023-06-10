@@ -193,3 +193,36 @@ def get_IOP(roi, bbox):
     interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
 
     return interArea / bboxArea
+
+def calculate_iou(box1, box2):
+    """
+    Calculate the Intersection over Union (IoU) between two bounding boxes.
+
+    Arguments:
+    box1: Tuple (x1, y1, x2, y2) representing the coordinates of the first bounding box.
+    box2: Tuple (x1, y1, x2, y2) representing the coordinates of the second bounding box.
+
+    Returns:
+    iou: Intersection over Union (IoU) value.
+    """
+
+    x1_min = max(box1[0], box2[0])
+    y1_min = max(box1[1], box2[1])
+    x2_max = min(box1[2], box2[2])
+    y2_max = min(box1[3], box2[3])
+
+    # Calculate intersection area
+    intersection_area = max(0, x2_max - x1_min + 1) * max(0, y2_max - y1_min + 1)
+
+    # Calculate the area of each bounding box
+    box1_area = (box1[2] - box1[0] + 1) * (box1[3] - box1[1] + 1)
+    box2_area = (box2[2] - box2[0] + 1) * (box2[3] - box2[1] + 1)
+
+    # Calculate the Union area by subtracting the intersection area
+    # and adding the areas of both bounding boxes
+    union_area = box1_area + box2_area - intersection_area
+
+    # Calculate the IoU
+    iou = intersection_area / union_area
+
+    return iou
