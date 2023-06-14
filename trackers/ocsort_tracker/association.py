@@ -482,6 +482,15 @@ def associate(
                 "gamma2": ang_gamma,
                 "sum": cost_gamma + ang_gamma
             })
+            cv2.putText(
+                img,
+                f"{idx}, {_idx}, {trk_count}",
+                (intbox[0], intbox[1]),
+                cv2.FONT_HERSHEY_PLAIN,
+                1.5,
+                t_color,
+                thickness=2,
+            )
             if iou != 0.0 and cos !=0.0:
                 cv2.putText(
                     img,

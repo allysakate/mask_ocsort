@@ -136,8 +136,9 @@ class VideoProcessor:
 
     def __init__(self, param, is_yolo):
         self.param = param
-        self.video = cv2.VideoCapture(self.param.config.video_path)
-        self.fps = self.video.get(cv2.CAP_PROP_FPS)
+        import glob
+        self.video = sorted(glob.glob(os.path.join(self.param.config.video_path, "*.jpg")))
+        self.fps = 25
         self.device = torch.device(self.param.model_device)
         self.cfg = None
         self.class_names = None
@@ -500,13 +501,15 @@ class VideoProcessor:
         Returns:
             is_included, frame
         """
-        is_included = False
+        is_included = True
         area = (box[2] - box[0]) * (box[3] - box[1])
         if self.param.config.roi:
-            roi_iop = get_IOP(self.param.config.roi, box)
-            condition = roi_iop < self.param.config.iop_threshold # and area > 5900
-        else:
-            condition = True
+            for roi in self.param.config.roi:
+                roi_iop = get_IOP(roi, box)
+                condition = roi_iop < self.param.config.iop_threshold # and area > 5900
+                if not condition:
+                    is_included = False
+                    break
         if condition:
             is_included = True
             if frame is not None:
@@ -548,10 +551,10 @@ class VideoProcessor:
         text_thickness = 2
         line_thickness = 3
         im = raw_img.copy()
-        roi = list(map(int, self.param.config.roi))
-        cv2.rectangle(
-            im, roi[0:2], roi[2:4], color=(255,255,255), thickness=line_thickness
-        )
+        for roi in self.param.config.roi:
+            cv2.rectangle(
+                im, roi[0:2], roi[2:4], color=(255,255,255), thickness=line_thickness
+            )
         boxes = []
         for bb in bboxes:
             ret, _ = self.filter_box(bb)
@@ -695,9 +698,13 @@ class VideoProcessor:
                 if is_included:
                     det = np.asarray(np.insert(det, 6, feat))
                     detections.append(det)
-        assoc_img, data, targets = self._tracker.update(
-            data, frame_id, raw_img, np.asarray(detections), self.param.with_feature, self.param.matcher, width
-        )
+        if detections:
+            assoc_img, data, targets = self._tracker.update(
+                data, frame_id, raw_img, np.asarray(detections), self.param.with_feature, self.param.matcher, width
+            )
+        else:
+            assoc_img = raw_img
+            targets = []
         track_tlwhs = []
         track_ids = []
         track_classes = []
@@ -796,10 +803,12 @@ class VideoProcessor:
         return track_tlwhs, track_ids, track_classes, trk_results, det_results
 
     def process(self, is_yolo):
-        width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        first_frame = cv2.imread(self.video[0])
+        height, width, _ = first_frame.shape
+        # width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+        # height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
         # num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-        basename, _ = os.path.splitext(os.path.basename(self.param.config.video_path))
+        basename = "MVI_39031"
         # current_time = time.localtime()
         # timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
         if self.param.config.is_save_result:
@@ -830,147 +839,148 @@ class VideoProcessor:
         frame_id = 0
         trk_results = []
         data = []
-        width = self.video.get(cv2.CAP_PROP_FRAME_WIDTH)
-        height = self.video.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        frame_count = self.video.get(cv2.CAP_PROP_FRAME_COUNT)
+        frame_count = len(self.video)
         prog_bar = ProgressBar(int(frame_count), fmt=ProgressBar.FULL)
 
-        while True:
+        # while True:
+        for image in self.video:
+            basename, _ = os.path.splitext(os.path.basename(image))
+            frame_id = int(basename.replace("img", "")) - 1
             if frame_id % self.fps == 0:
                 self.logger.info(
                     "Processing frame {} ({:.2f} fps)".format(
                         frame_id, 1.0 / max(1e-5, timer.average_time)
                     )
                 )
-            ret_val, frame = self.video.read()
-            if ret_val:
-                raw_img = frame
-                frame_copy = frame.copy()
-                det_results = []
-                timer.tic()
-                if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
-                    det_timer.tic()
-                    hooker = self.set_hooker()
+            frame = cv2.imread(image)
+            # if ret_val:
+            raw_img = frame
+            frame_copy = frame.copy()
+            det_results = []
+            timer.tic()
+            if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
+                det_timer.tic()
+                hooker = self.set_hooker()
 
-                    if not is_yolo:
-                        predictions = self.predictor(frame)
-                        predictions = predictions["instances"].to(torch.device("cpu"))
+                if not is_yolo:
+                    predictions = self.predictor(frame)
+                    predictions = predictions["instances"].to(torch.device("cpu"))
 
-                        if hooker and self.param.matcher is None:
-                            mask_pool = hooker.outputs[-1].cpu()
-                            hooker.remove()
-                        else:
-                            mask_pool = None
-
-                        (
-                            feat_masks,
-                            seg_masks,
-                            boxes,
-                            scores,
-                            classes,
-                        ) = self.det2_process(
-                            predictions,
-                            mask_pool,
-                            self.param.matcher,
-                        )
-
+                    if hooker and self.param.matcher is None:
+                        mask_pool = hooker.outputs[-1].cpu()
+                        hooker.remove()
                     else:
-                        frame = self.set_frame(frame)
-                        _, _, f_height, f_width = frame.shape
-                        predictions = self.predictor(frame)
+                        mask_pool = None
+
+                    (
+                        feat_masks,
+                        seg_masks,
+                        boxes,
+                        scores,
+                        classes,
+                    ) = self.det2_process(
+                        predictions,
+                        mask_pool,
+                        self.param.matcher,
+                    )
+
+                else:
+                    frame = self.set_frame(frame)
+                    _, _, f_height, f_width = frame.shape
+                    predictions = self.predictor(frame)
+                    (
+                        feat_masks,
+                        seg_masks,
+                        boxes,
+                        scores,
+                        classes,
+                    ) = self.yolo_process(
+                        predictions, (f_height, f_width), (height, width)
+                    )
+                det_timer.toc()
+                trk_timer.tic()
+                if boxes.any():
+                    # TODO: tracking
+                    if not self.param.use_ocsort:
                         (
-                            feat_masks,
-                            seg_masks,
-                            boxes,
-                            scores,
-                            classes,
-                        ) = self.yolo_process(
-                            predictions, (f_height, f_width), (height, width)
-                        )
-                    det_timer.toc()
-                    trk_timer.tic()
-                    if boxes.any():
-                        # TODO: tracking
-                        if not self.param.use_ocsort:
-                            (
-                                track_tlwhs,
-                                track_ids,
-                                track_classes,
-                                trk_results,
-                                det_results,
-                            ) = self.deepsort(
-                                frame_copy,
-                                frame_id,
-                                feat_masks,
-                                boxes,
-                                scores,
-                                classes,
-                                trk_results,
-                                det_results,
-                                self.class_names,
-                            )
-                        else:
-                            (   
-                                assoc_img,
-                                data,
-                                img_v,
-                                track_tlwhs,
-                                track_ids,
-                                track_classes,
-                                trk_results,
-                                det_results,
-                            ) = self.ocsort(
-                                data,
-                                frame_copy,
-                                frame_id,
-                                feat_masks,
-                                seg_masks,
-                                boxes,
-                                scores,
-                                classes,
-                                trk_results,
-                                det_results,
-                                self.class_names,
-                                width,
-                            )
-                        trk_timer.toc()
-                        timer.toc()
-                        res_image = self.plot_tracking(
-                            raw_img,
                             track_tlwhs,
                             track_ids,
                             track_classes,
-                            frame_id=frame_id + 1,
-                            fps=1.0 / timer.average_time,
+                            trk_results,
+                            det_results,
+                        ) = self.deepsort(
+                            frame_copy,
+                            frame_id,
+                            feat_masks,
+                            boxes,
+                            scores,
+                            classes,
+                            trk_results,
+                            det_results,
+                            self.class_names,
                         )
-                        res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
-                        for box in boxes:
-                            _, res_image = self.filter_box(box, res_image)
-                        cv2.imwrite(res_path, res_image)
-                        # Write det lines fro evaluation
-                        new_gt_file = open(
-                            os.path.join(self.det_dir, f"{frame_id:06d}.txt"), "w"
-                        )
-                        new_gt_file.writelines(det_results)
-                        new_gt_file.close()  # to change file access modes
                     else:
-                        res_image = raw_img
-                    if self.param.config.is_save_result:
-                        vid_writer.write(res_image)
-                        iou_path = os.path.join(self.data_attr, f"{frame_id}.jpg")
-                        if img_v.any():
-                            # Stack the images horizontally
-                            stacked_image = cv2.hconcat([img_v, res_image])
-                            cv2.imwrite(iou_path, stacked_image)
-            else:
-                timer.toc()
-                self.logger.info(f"Average Time: {timer.average_time}")
-                self.logger.info(f"Total Time: {timer.total_time}")
-                self.logger.info(
-                    f"Time: {det_timer.total_time}, {det_timer.average_time}, {trk_timer.total_time}, {trk_timer.average_time}, {timer.total_time}, {timer.average_time}"
-                )
-                break
-            frame_id += 1
+                        (   
+                            assoc_img,
+                            data,
+                            img_v,
+                            track_tlwhs,
+                            track_ids,
+                            track_classes,
+                            trk_results,
+                            det_results,
+                        ) = self.ocsort(
+                            data,
+                            frame_copy,
+                            frame_id,
+                            feat_masks,
+                            seg_masks,
+                            boxes,
+                            scores,
+                            classes,
+                            trk_results,
+                            det_results,
+                            self.class_names,
+                            width,
+                        )
+                    trk_timer.toc()
+                    timer.toc()
+                    res_image = self.plot_tracking(
+                        raw_img,
+                        track_tlwhs,
+                        track_ids,
+                        track_classes,
+                        frame_id=frame_id + 1,
+                        fps=1.0 / timer.average_time,
+                    )
+                    res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
+                    for box in boxes:
+                        _, res_image = self.filter_box(box, res_image)
+                    cv2.imwrite(res_path, res_image)
+                    # Write det lines fro evaluation
+                    new_gt_file = open(
+                        os.path.join(self.det_dir, f"{frame_id:06d}.txt"), "w"
+                    )
+                    new_gt_file.writelines(det_results)
+                    new_gt_file.close()  # to change file access modes
+                else:
+                    res_image = raw_img
+                if self.param.config.is_save_result:
+                    vid_writer.write(res_image)
+                    iou_path = os.path.join(self.data_attr, f"{frame_id}.jpg")
+                    if img_v.any():
+                        # Stack the images horizontally
+                        stacked_image = cv2.hconcat([img_v, res_image])
+                        cv2.imwrite(iou_path, stacked_image)
+            # else:
+            #     timer.toc()
+            #     self.logger.info(f"Average Time: {timer.average_time}")
+            #     self.logger.info(f"Total Time: {timer.total_time}")
+            #     self.logger.info(
+            #         f"Time: {det_timer.total_time}, {det_timer.average_time}, {trk_timer.total_time}, {trk_timer.average_time}, {timer.total_time}, {timer.average_time}"
+            #     )
+            #     break
+            # frame_id += 1
 
             # Update progress bar
             prog_bar.current += 1
