@@ -10,6 +10,7 @@ import torch.nn as nn
 from torchvision import transforms
 import cv2
 import numpy as np
+from glob import glob
 from torchvision.ops import masks_to_boxes
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.data import MetadataCatalog
@@ -50,7 +51,7 @@ class ParameterManager:
         metadata (object):      testing metadata
     """
 
-    def __init__(self, yml_path: str):
+    def __init__(self, yml_path: str, filename: str):
         self.config = get_config(yml_path)
         self.matcher = self.config.matcher
         if self.matcher:
@@ -58,6 +59,7 @@ class ParameterManager:
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.predictor_name = None
         self.tracker_name = None
+        self.filename = filename
         self.text_filename = None
         self.folder_name = None
         self.use_ocsort = None
@@ -69,21 +71,18 @@ class ParameterManager:
         self.max_age = self.config.max_age
 
     def set_text_filename(self):
-        pred_name = self.predictor_name
-        text = f"{pred_name}_FPS{self.frame_use}_{self.matcher}_MA{str(self.max_age)}"
-        self.text_filename = text.upper()
+        # pred_name = self.predictor_name
+        # text = f"{pred_name}_FPS{self.frame_use}_{self.matcher}_MA{str(self.max_age)}"
+        self.text_filename = self.filename
 
     def set_useocsort_feat(self):
         if self.tracker_name == "MASKOCSORT":
-            self.folder_name = "CATaft03-test"
             self.use_ocsort = True
             self.with_feature = True
         elif self.tracker_name == "OCSORT":
-            self.folder_name = "CATaft02-test"
             self.use_ocsort = True
             self.with_feature = False
         elif self.tracker_name == "DEEPSORT":
-            self.folder_name = "CATaft01-test"
             self.use_ocsort = False
             self.with_feature = True
 
@@ -136,8 +135,8 @@ class VideoProcessor:
 
     def __init__(self, param, is_yolo):
         self.param = param
-        import glob
-        self.video = sorted(glob.glob(os.path.join(self.param.config.video_path, "*.jpg")))
+        df = "/media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/ua_detract/images"
+        self.video = sorted(glob(os.path.join(df , f"{param.filename}/*.jpg")))
         self.fps = 25
         self.device = torch.device(self.param.model_device)
         self.cfg = None
@@ -148,19 +147,19 @@ class VideoProcessor:
         else:
             self.predictor = self.set_yolomodel()
         self.output_dir = create_output(
-            param.config.output_dir, f"{param.folder_name}/{param.tracker_name}/data"
+            param.config.output_dir, f"{param.filename}/{param.frame_use}FPS/data"
         )
         self.det_dir = create_output(
-            param.config.det_dir, f"{param.tracker_name}/{param.text_filename}"
+            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}"
         )
         self.image_dir = create_output(
-            param.config.det_dir, f"{param.tracker_name}/{param.text_filename}/images"
+            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}/images"
         )
         self.data_attr = create_output(
-            param.config.det_dir, f"{param.tracker_name}/{param.text_filename}/params"
+            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}/params"
         )
         self.data_assoc = create_output(
-            param.config.det_dir, f"{param.tracker_name}/{param.text_filename}/assoc"
+            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}/assoc"
         )
         if not param.matcher:
             self.det_res_dir = create_output(
@@ -861,108 +860,111 @@ class VideoProcessor:
             if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
                 det_timer.tic()
                 hooker = self.set_hooker()
+                try:
+                    if not is_yolo:
+                        predictions = self.predictor(frame)
+                        predictions = predictions["instances"].to(torch.device("cpu"))
 
-                if not is_yolo:
-                    predictions = self.predictor(frame)
-                    predictions = predictions["instances"].to(torch.device("cpu"))
+                        if hooker and self.param.matcher is None:
+                            mask_pool = hooker.outputs[-1].cpu()
+                            hooker.remove()
+                        else:
+                            mask_pool = None
+                        if predictions:
+                            (
+                                feat_masks,
+                                seg_masks,
+                                boxes,
+                                scores,
+                                classes,
+                            ) = self.det2_process(
+                                predictions,
+                                mask_pool,
+                                self.param.matcher,
+                            )
 
-                    if hooker and self.param.matcher is None:
-                        mask_pool = hooker.outputs[-1].cpu()
-                        hooker.remove()
                     else:
-                        mask_pool = None
-
-                    (
-                        feat_masks,
-                        seg_masks,
-                        boxes,
-                        scores,
-                        classes,
-                    ) = self.det2_process(
-                        predictions,
-                        mask_pool,
-                        self.param.matcher,
-                    )
-
-                else:
-                    frame = self.set_frame(frame)
-                    _, _, f_height, f_width = frame.shape
-                    predictions = self.predictor(frame)
-                    (
-                        feat_masks,
-                        seg_masks,
-                        boxes,
-                        scores,
-                        classes,
-                    ) = self.yolo_process(
-                        predictions, (f_height, f_width), (height, width)
-                    )
-                det_timer.toc()
-                trk_timer.tic()
-                if boxes.any():
-                    # TODO: tracking
-                    if not self.param.use_ocsort:
+                        frame = self.set_frame(frame)
+                        _, _, f_height, f_width = frame.shape
+                        predictions = self.predictor(frame)
                         (
-                            track_tlwhs,
-                            track_ids,
-                            track_classes,
-                            trk_results,
-                            det_results,
-                        ) = self.deepsort(
-                            frame_copy,
-                            frame_id,
-                            feat_masks,
-                            boxes,
-                            scores,
-                            classes,
-                            trk_results,
-                            det_results,
-                            self.class_names,
-                        )
-                    else:
-                        (   
-                            assoc_img,
-                            data,
-                            img_v,
-                            track_tlwhs,
-                            track_ids,
-                            track_classes,
-                            trk_results,
-                            det_results,
-                        ) = self.ocsort(
-                            data,
-                            frame_copy,
-                            frame_id,
                             feat_masks,
                             seg_masks,
                             boxes,
                             scores,
                             classes,
-                            trk_results,
-                            det_results,
-                            self.class_names,
-                            width,
+                        ) = self.yolo_process(
+                            predictions, (f_height, f_width), (height, width)
                         )
-                    trk_timer.toc()
-                    timer.toc()
-                    res_image = self.plot_tracking(
-                        raw_img,
-                        track_tlwhs,
-                        track_ids,
-                        track_classes,
-                        frame_id=frame_id + 1,
-                        fps=1.0 / timer.average_time,
-                    )
-                    res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
-                    for box in boxes:
-                        _, res_image = self.filter_box(box, res_image)
-                    cv2.imwrite(res_path, res_image)
-                    # Write det lines fro evaluation
-                    new_gt_file = open(
-                        os.path.join(self.det_dir, f"{frame_id:06d}.txt"), "w"
-                    )
-                    new_gt_file.writelines(det_results)
-                    new_gt_file.close()  # to change file access modes
+                    det_timer.toc()
+                    trk_timer.tic()
+                    if boxes.any():
+                        # TODO: tracking
+                        if not self.param.use_ocsort:
+                            (
+                                track_tlwhs,
+                                track_ids,
+                                track_classes,
+                                trk_results,
+                                det_results,
+                            ) = self.deepsort(
+                                frame_copy,
+                                frame_id,
+                                feat_masks,
+                                boxes,
+                                scores,
+                                classes,
+                                trk_results,
+                                det_results,
+                                self.class_names,
+                            )
+                        else:
+                            (   
+                                assoc_img,
+                                data,
+                                img_v,
+                                track_tlwhs,
+                                track_ids,
+                                track_classes,
+                                trk_results,
+                                det_results,
+                            ) = self.ocsort(
+                                data,
+                                frame_copy,
+                                frame_id,
+                                feat_masks,
+                                seg_masks,
+                                boxes,
+                                scores,
+                                classes,
+                                trk_results,
+                                det_results,
+                                self.class_names,
+                                width,
+                            )
+                        trk_timer.toc()
+                        timer.toc()
+                        res_image = self.plot_tracking(
+                            raw_img,
+                            track_tlwhs,
+                            track_ids,
+                            track_classes,
+                            frame_id=frame_id + 1,
+                            fps=1.0 / timer.average_time,
+                        )
+                        res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
+                        for box in boxes:
+                            _, res_image = self.filter_box(box, res_image)
+                        cv2.imwrite(res_path, res_image)
+                        # Write det lines fro evaluation
+                        new_gt_file = open(
+                            os.path.join(self.det_dir, f"{frame_id:06d}.txt"), "w"
+                        )
+                        new_gt_file.writelines(det_results)
+                        new_gt_file.close()  # to change file access modes
+
+                except Exception as e:
+                    print(e)
                 else:
                     res_image = raw_img
                 if self.param.config.is_save_result:
@@ -1020,11 +1022,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch", action="store_true", help="if batch ")
     args = parser.parse_args()
     is_yolo = False
-    param = ParameterManager("configs/demo_config.yaml")
-    if args.batch:
-        for frame_use in [1, 5, 25]:
-            for value in [10,30,50]:
-                param.max_age = value
+    xml_files = sorted(glob("/media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/ua_detract/annotations/*.xml"))
+    for xml_file in xml_files:
+        filename, _ = os.path.splitext(os.path.basename(xml_file))
+        param = ParameterManager("configs/demo_config.yaml", filename)
+        if args.batch:
+            for frame_use in [5,25]:
+                # for value in [10,30,50]:
+                #     param.max_age = value
                 param.frame_use = frame_use
                 for predictor in ["SOLOV2"]:
                     param.predictor_name = predictor.upper()
@@ -1061,6 +1066,7 @@ if __name__ == "__main__":
                             print()
                     is_yolo = False
     else:
+        param = ParameterManager("configs/demo_config.yaml", None)
         param.predictor_name = param.config.predictor.upper()
         param.tracker_name = param.config.tracker.upper()
         if param.predictor_name == "YOLOV7":

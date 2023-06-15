@@ -8,10 +8,10 @@ config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 # checkpoints/SOLOv2_R50_3x.pth checkpoints/MaskRCNN_R50_3x.pkl checkpoints/YOLOv7_Mask.pt
 weight_file : checkpoints/SOLOv2_R50_3x.pth
 is_save_result : True
-frame_use : 25
-video_path : /home/allysakate/Videos/MVI_39031/images
-output_dir :  /home/allysakate/Videos/MVI_39031/trackers
-det_dir : /home/allysakate/Videos/MVI_39031/detectors
+frame_use : 1
+video_path : /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/ua_detract/images
+output_dir :  /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/tracking/ua_detrac
+det_dir : /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/detectors/ua_detrac
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 # class_list : [1, 2, 3, 5, 7]
 class_list : [2]
