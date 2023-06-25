@@ -388,7 +388,9 @@ def compute_cost(iou_matrix, feat_matrix, pos_matrix, iou_weight):
                 iou_matrix * 0.5, feat_matrix * 0.25, pos_matrix * 0.25
             )
         else:
-            cost_matrix = np.add(iou_matrix * iou_weight, feat_matrix * (1-iou_weight))
+            cost_matrix = np.add(
+                iou_matrix * iou_weight, feat_matrix * (1 - iou_weight)
+            )
     # max_m = cost_matrix.argmax(axis=1)
     # max_v = np.amax(cost_matrix, axis=1)
     return cost_matrix
@@ -413,7 +415,13 @@ def associate(
     pos_matrix=None,
 ):
     if len(trackers) == 0:
-        return image, data, np.empty((0, 2), dtype=int), np.arange(len(detections)), np.empty((0, length), dtype=int)
+        return (
+            image,
+            data,
+            np.empty((0, 2), dtype=int),
+            np.arange(len(detections)),
+            np.empty((0, length), dtype=int),
+        )
     Y, X = speed_direction_batch(detections, previous_obs)
     inertia_Y, inertia_X = velocities[:, 0], velocities[:, 1]
     inertia_Y = np.repeat(inertia_Y[:, np.newaxis], Y.shape[1], axis=1)
@@ -446,67 +454,60 @@ def associate(
     angle_diff_cost = angle_diff_cost * scores
 
     img = image.copy()
-    for idx, det in enumerate(detections):
-        _idx = idx + 1
-        t_color = colors_instance[_idx]
-        det_bbox = det[:4]
-        intbox = list(map(int, det_bbox))
-        cv2.rectangle(img, intbox[0:2], intbox[2:4], color=t_color, thickness=3)
-        trk_count = 0
-        txt_count = 0
-        gamma2 = 0.2
-        gamma1 = 0.7
-        cost_row = cost_matrix[idx]
-        iou_row = iou_matrix[idx]
-        cos_row = feat_matrix[idx]
-        angle_row = angle_diff_weight[idx]
-        iou_idx = np.argmax(iou_row)
-        cos_idx = np.argmax(cos_row)
-        for iou, cos, ang, ic in zip(iou_row, cos_row, angle_row, cost_row):
-            ang_gamma = ang * gamma2
-            cost_gamma = gamma1*iou + (1-gamma1)*cos
-            if trk_count in [iou_idx, cos_idx]:
-                text_color = colors_instance[trk_count]
-            else: 
-                text_color = (0,0,0)
-            text = f"{trk_count}: I={iou:.2f}, C={cos:.2f}, A:{ang:.2f}, IC: {ic:.2f}"
-            data.append({
-                "frame_id": frame_id,
-                "det": idx,
-                "trk": trk_count,
-                "iou": iou,
-                "cos": cos,
-                "ang": ang,
-                "cost": ic,
-                "gamma1": cost_gamma,
-                "gamma2": ang_gamma,
-                "sum": cost_gamma + ang_gamma
-            })
-            cv2.putText(
-                img,
-                f"{idx}, {_idx}, {trk_count}",
-                (intbox[0], intbox[1]),
-                cv2.FONT_HERSHEY_PLAIN,
-                1.5,
-                t_color,
-                thickness=2,
-            )
-            if iou != 0.0 and cos !=0.0:
-                cv2.putText(
-                    img,
-                    text,
-                    (intbox[0], intbox[1]+12*(txt_count+1)),
-                    cv2.FONT_HERSHEY_PLAIN,
-                    1.2, # text_size,
-                    text_color,
-                    thickness=2,
+    if with_feature:
+        for idx, det in enumerate(detections):
+            _idx = idx + 1
+            t_color = colors_instance[_idx]
+            det_bbox = det[:4]
+            intbox = list(map(int, det_bbox))
+            cv2.rectangle(img, intbox[0:2], intbox[2:4], color=t_color, thickness=3)
+            trk_count = 0
+            txt_count = 0
+            gamma2 = vdc_weight
+            gamma1 = iou_weight
+            cost_row = cost_matrix[idx]
+            iou_row = iou_matrix[idx]
+            cos_row = feat_matrix[idx]
+            angle_row = angle_diff_weight[idx]
+            iou_idx = np.argmax(iou_row)
+            cos_idx = np.argmax(cos_row)
+            for iou, cos, ang, ic in zip(iou_row, cos_row, angle_row, cost_row):
+                ang_gamma = ang * gamma2
+                cost_gamma = gamma1 * iou + (1 - gamma1) * cos
+                if trk_count in [iou_idx, cos_idx]:
+                    text_color = colors_instance[trk_count]
+                else:
+                    text_color = (0, 0, 0)
+                text = f"I={iou:.2f}, C={cos:.2f}, A:{ang:.2f}, IC: {ic:.2f}"
+                data.append(
+                    {
+                        "frame_id": frame_id,
+                        "det": idx,
+                        "trk": trk_count,
+                        "iou": iou,
+                        "cos": cos,
+                        "ang": ang,
+                        "cost": ic,
+                        "gamma1": cost_gamma,
+                        "gamma2": ang_gamma,
+                        "sum": cost_gamma + ang_gamma,
+                    }
                 )
-                txt_count += 1
-            trk_count += 1
-    iou_path = os.path.join(out_folder, f"{frame_id}.jpg")
-    if img.any():
-        cv2.imwrite(iou_path, img)
-
+                if ic >= 0.3:
+                    cv2.putText(
+                        img,
+                        text,
+                        (intbox[0], intbox[1] + 12 * (txt_count + 1)),
+                        cv2.FONT_HERSHEY_PLAIN,
+                        1.2,  # text_size,
+                        text_color,
+                        thickness=2,
+                    )
+                    txt_count += 1
+                trk_count += 1
+        iou_path = os.path.join(out_folder, f"{frame_id}.jpg")
+        if img.any():
+            cv2.imwrite(iou_path, img)
 
     if min(cost_matrix.shape) > 0:
         a = (cost_matrix > iou_threshold).astype(np.int32)
@@ -539,4 +540,10 @@ def associate(
     else:
         matches = np.concatenate(matches, axis=0)
 
-    return img, data, matches, np.array(unmatched_detections), np.array(unmatched_trackers)
+    return (
+        img,
+        data,
+        matches,
+        np.array(unmatched_detections),
+        np.array(unmatched_trackers),
+    )

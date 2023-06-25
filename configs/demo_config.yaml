@@ -9,14 +9,14 @@ config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 weight_file : checkpoints/SOLOv2_R50_3x.pth
 is_save_result : True
 frame_use : 1
-video_path : /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/ua_detract/images
-output_dir :  /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/tracking/ua_detrac
-det_dir : /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/detectors/ua_detrac
+video_path : /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/APMC/task_ch08af_20190804170000-1/videos/ch08af_20190804170000-1.mp4
+image_path : # /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/UADetrac/images
+output_dir :  /media/catchall/OneTouch/1_PhD/Dissertation/Scripts/TrackEval/data/trackers/apmc
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
-# class_list : [1, 2, 3, 5, 7]
 class_list : [2]
-# roi :
-roi : [[335, 52, 592, 170], [0, 296, 224, 417], [690, 116, 960, 211]]  # 1
+# class_list : [2]
+# roi : [[335, 52, 592, 170], [0, 296, 224, 417], [690, 116, 960, 211]]  # UAD
+roi : [[1126, 0, 1918, 200]]  # 1 APMC
 # roi : [883.99, 1.65, 1918.08, 241.23] #2
 confidence_threshold : 0.5
 iop_threshold : 0.1
@@ -27,4 +27,4 @@ _min_box_area_thresh : 10
 iou_weight : 0.3
 vd_weight : 0.2
 min_hits : 3
-max_age : 10
+max_age : 30

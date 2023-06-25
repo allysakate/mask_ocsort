@@ -25,7 +25,15 @@ from models.feature_extractor import FeatExtractor
 from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
 from trackers.tracking_utils.timer import Timer
-from utils import initiate_logging, get_config, create_output, get_IOP, close_logging, calculate_iou, colors_instance
+from utils import (
+    initiate_logging,
+    get_config,
+    create_output,
+    get_IOP,
+    close_logging,
+    calculate_iou,
+    colors_instance,
+)
 from progress_bar import ProgressBar
 
 IOU_LIST = []
@@ -51,7 +59,7 @@ class ParameterManager:
         metadata (object):      testing metadata
     """
 
-    def __init__(self, yml_path: str, filename: str):
+    def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
         self.matcher = self.config.matcher
         if self.matcher:
@@ -59,7 +67,6 @@ class ParameterManager:
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.predictor_name = None
         self.tracker_name = None
-        self.filename = filename
         self.text_filename = None
         self.folder_name = None
         self.use_ocsort = None
@@ -71,12 +78,10 @@ class ParameterManager:
         self.max_age = self.config.max_age
 
     def set_text_filename(self):
-        # pred_name = self.predictor_name
-        # text = f"{pred_name}_FPS{self.frame_use}_{self.matcher}_MA{str(self.max_age)}"
-        self.text_filename = self.filename
+        self.text_filename = f"{self.frame_use}FPS"
 
     def set_useocsort_feat(self):
-        if self.tracker_name == "MASKOCSORT":
+        if self.tracker_name in ["MASKOCSORT", "DEEPOCSORT"]:
             self.use_ocsort = True
             self.with_feature = True
         elif self.tracker_name == "OCSORT":
@@ -135,49 +140,59 @@ class VideoProcessor:
 
     def __init__(self, param, is_yolo):
         self.param = param
-        df = "/media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/ua_detract/images"
-        self.video = sorted(glob(os.path.join(df , f"{param.filename}/*.jpg")))
-        self.fps = 25
+        self.is_yolo = is_yolo
+        if self.param.config.image_path:
+            print(self.param.config.image_path)
+            self.video = sorted(
+                glob(os.path.join(self.param.config.image_path, "*.jpg"))
+            )
+            self.fps = 25
+            first_frame_path = self.video[0]
+            self.basename = os.path.dirname(first_frame_path).split("/")[-1]
+            first_frame = cv2.imread(first_frame_path)
+            self.height, self.width, _ = first_frame.shape
+            self.num_frames = len(self.video)
+        else:
+            self.video = cv2.VideoCapture(self.param.config.video_path)
+            self.fps = self.video.get(cv2.CAP_PROP_FPS)
+            self.width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.num_frames = int(self.video.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.basename, _ = os.path.splitext(
+                os.path.basename(self.param.config.video_path)
+            )
+
         self.device = torch.device(self.param.model_device)
         self.cfg = None
         self.class_names = None
         self.period_threshold = 0
-        if not is_yolo:
+        if not self.is_yolo:
             self.predictor = self.set_det2model()
         else:
             self.predictor = self.set_yolomodel()
         self.output_dir = create_output(
-            param.config.output_dir, f"{param.filename}/{param.frame_use}FPS/data"
+            param.config.output_dir, f"{self.basename}-test/{param.tracker_name}/data"
         )
         self.det_dir = create_output(
-            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}"
+            param.config.output_dir,
+            f"{self.basename}-test/{param.tracker_name}/{param.text_filename}",
         )
-        self.image_dir = create_output(
-            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}/images"
-        )
-        self.data_attr = create_output(
-            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}/params"
-        )
-        self.data_assoc = create_output(
-            param.config.det_dir, f"{param.frame_use}FPS/{param.text_filename}/assoc"
-        )
-        if not param.matcher:
-            self.det_res_dir = create_output(
-                param.config.det_dir, f"det_results/{param.text_filename}"
-            )
-        elif param.matcher == "COSINESL":
+        self.image_dir = create_output(self.det_dir, "images")
+        self.data_attr = create_output(self.det_dir, "params")
+        self.data_assoc = create_output(self.det_dir, "assoc")
+        self.det_res_dir = create_output(self.det_dir, "det")
+        if param.matcher == "COSINESL":
             if param.model_device == "cuda:0":
                 use_cuda = True
             else:
                 use_cuda = False
             # Extractor: "checkpoints/CosineMetric_Learning.t7", use_cuda=use_cuda
             self.extractor = FeatExtractor("alexnet-fc7", use_cuda=use_cuda)
-        log_dir = create_output(param.config.det_dir, f"{param.tracker_name}/logs")
+        log_dir = create_output(self.det_dir, "logs")
         self.logger = initiate_logging(log_dir, param.text_filename)
         self.bbox_ids = []
         self.bbox_list = []
         self.prev_img = None
-
 
     @property
     def frame_skip(self):
@@ -465,7 +480,7 @@ class VideoProcessor:
             x1, y1, w, h = tlwh
             intbox = tuple(map(int, (x1, y1, x1 + w, y1 + h)))
             obj_id = int(obj_ids[i])
-            id_text = "{}".format(int(obj_id))
+            id_text = f"Trk: {obj_id}, Cls: {classes[i]}"
             if ids2 is not None:
                 id_text = id_text + ", {}".format(int(ids2[i]))
             color = get_color(abs(obj_id))
@@ -501,16 +516,15 @@ class VideoProcessor:
             is_included, frame
         """
         is_included = True
-        area = (box[2] - box[0]) * (box[3] - box[1])
+        # area = (box[2] - box[0]) * (box[3] - box[1])
         if self.param.config.roi:
             for roi in self.param.config.roi:
                 roi_iop = get_IOP(roi, box)
-                condition = roi_iop < self.param.config.iop_threshold # and area > 5900
+                condition = roi_iop < self.param.config.iop_threshold  # and area > 5900
                 if not condition:
                     is_included = False
                     break
         if condition:
-            is_included = True
             if frame is not None:
                 intbox = tuple(map(int, box))
                 cv2.rectangle(
@@ -544,7 +558,7 @@ class VideoProcessor:
             x2, y2 = list(map(int, point2))
             m = (y2 - y1) / (x2 - x1 + 1)
             x = x1 + 30
-            return abs(m*(x - x1) - y1)
+            return abs(m * (x - x1) - y1)
 
         text_scale = 1.2
         text_thickness = 2
@@ -552,7 +566,7 @@ class VideoProcessor:
         im = raw_img.copy()
         for roi in self.param.config.roi:
             cv2.rectangle(
-                im, roi[0:2], roi[2:4], color=(255,255,255), thickness=line_thickness
+                im, roi[0:2], roi[2:4], color=(255, 255, 255), thickness=line_thickness
             )
         boxes = []
         for bb in bboxes:
@@ -567,7 +581,11 @@ class VideoProcessor:
                 im, intbox[0:2], intbox[2:4], color=i_color, thickness=line_thickness
             )
             cv2.rectangle(
-                im, (intbox[0], intbox[1]-20), (intbox[0]+180, intbox[1]), color=(0,0,0), thickness=-1
+                im,
+                (intbox[0], intbox[1] - 20),
+                (intbox[0] + 180, intbox[1]),
+                color=(0, 0, 0),
+                thickness=-1,
             )
             area = (box[2] - box[0]) * (box[3] - box[1])
             scale = math.sqrt(area)
@@ -576,7 +594,7 @@ class VideoProcessor:
             cv2.putText(
                 im,
                 i_text,
-                (intbox[0], intbox[1]-5),
+                (intbox[0], intbox[1] - 5),
                 cv2.FONT_HERSHEY_PLAIN,
                 text_scale,
                 (255, 255, 255),
@@ -587,13 +605,15 @@ class VideoProcessor:
             next_bbox = []
             if len(self.bbox_ids):
                 for b_id, bbox in zip(self.bbox_ids, self.bbox_list):
-                    cx1, cy1 = (intbox[0] + intbox[2]) / 2.0, (intbox[1] + intbox[3]) / 2.0
+                    cx1, cy1 = (intbox[0] + intbox[2]) / 2.0, (
+                        intbox[1] + intbox[3]
+                    ) / 2.0
                     cx2, cy2 = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
                     distance = np.sqrt((cy2 - cy1) ** 2 + (cx2 - cx1) ** 2) + 1e-6
                     try:
                         new_cy = point_equation((cx1, cy1), (cx2, cy2))
                         d_text = f"{b_id+1}: {distance:.2f}"
-                        dist_list.append([b_id, d_text, [cx1, cy1, cx1+30, new_cy]])
+                        dist_list.append([b_id, d_text, [cx1, cy1, cx1 + 30, new_cy]])
                         next_ids.append(b_id)
                         next_bbox.append(bbox)
                     except ZeroDivisionError:
@@ -622,29 +642,32 @@ class VideoProcessor:
             text_list = []
             for j, box in enumerate(boxes):
                 if i != j:
-                    j_intbox = list(map(int,box))
+                    j_intbox = list(map(int, box))
                     j_iop = calculate_iou(j_intbox, intbox)
                     if j_iop > 0.01:
                         IOU_LIST.append(j_iop)
                         j_text = f"{j+1}: {j_iop:.2f}"
                         text_list.append(j_text)
-            height = int(len(text_list)*20)
+            height = int(len(text_list) * 20)
             cv2.rectangle(
-                im, intbox[0:2], (intbox[0]+100, intbox[1]+height), color=(255,255,255), thickness=-1
+                im,
+                intbox[0:2],
+                (intbox[0] + 100, intbox[1] + height),
+                color=(255, 255, 255),
+                thickness=-1,
             )
             for idx, j_text in enumerate(text_list):
                 j_color = colors_instance[idx]
                 cv2.putText(
                     im,
                     j_text,
-                    (intbox[0], intbox[1]+14*(idx+1)),
+                    (intbox[0], intbox[1] + 14 * (idx + 1)),
                     cv2.FONT_HERSHEY_PLAIN,
                     text_scale,
                     j_color,
                     thickness=text_thickness,
                 )
         return im
-
 
     def ocsort(
         self,
@@ -699,7 +722,13 @@ class VideoProcessor:
                     detections.append(det)
         if detections:
             assoc_img, data, targets = self._tracker.update(
-                data, frame_id, raw_img, np.asarray(detections), self.param.with_feature, self.param.matcher, width
+                data,
+                frame_id,
+                raw_img,
+                np.asarray(detections),
+                self.param.with_feature,
+                self.param.matcher,
+                width,
             )
         else:
             assoc_img = raw_img
@@ -720,7 +749,8 @@ class VideoProcessor:
             tclass = int(tlbrs[4])
             # vertical = box_width / box_height > self.param.config._aspect_ratio_thresh
             if (
-                box_width * box_height > self.param.config._min_box_area_thresh
+                box_width * box_height
+                > self.param.config._min_box_area_thresh
                 # and not vertical
             ):
                 track_tlwhs.append(tlwh)
@@ -733,7 +763,16 @@ class VideoProcessor:
                     f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
                 )
 
-        return assoc_img, data, img_v, track_tlwhs, track_ids, track_classes, trk_results, det_results
+        return (
+            assoc_img,
+            data,
+            img_v,
+            track_tlwhs,
+            track_ids,
+            track_classes,
+            trk_results,
+            det_results,
+        )
 
     def deepsort(
         self,
@@ -790,7 +829,8 @@ class VideoProcessor:
             tid = track.track_id
             # vertical = box_width / box_height > self.param.config._aspect_ratio_thresh
             if (
-                box_width * box_height > self.param.config._min_box_area_thresh
+                box_width * box_height
+                > self.param.config._min_box_area_thresh
                 # and not vertical
             ):
                 track_tlwhs.append(tlwh)
@@ -801,26 +841,150 @@ class VideoProcessor:
                 )
         return track_tlwhs, track_ids, track_classes, trk_results, det_results
 
-    def process(self, is_yolo):
-        first_frame = cv2.imread(self.video[0])
-        height, width, _ = first_frame.shape
-        # width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
-        # height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        # num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-        basename = "MVI_39031"
+    def perform_task(
+        self,
+        frame,
+        frame_id,
+        data,
+        det_results,
+        trk_results,
+        timer,
+        det_timer,
+        trk_timer,
+        vid_writer,
+    ):
+        raw_img = frame
+        img_v = frame.copy()
+        frame_copy = frame.copy()
+        res_image = frame.copy()
+        timer.tic()
+        if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
+            det_timer.tic()
+            hooker = self.set_hooker()
+            # try:
+            if not self.is_yolo:
+                predictions = self.predictor(frame)
+                predictions = predictions["instances"].to(torch.device("cpu"))
+
+                if hooker and self.param.matcher is None:
+                    mask_pool = hooker.outputs[-1].cpu()
+                    hooker.remove()
+                else:
+                    mask_pool = None
+                if predictions:
+                    (
+                        feat_masks,
+                        seg_masks,
+                        boxes,
+                        scores,
+                        classes,
+                    ) = self.det2_process(
+                        predictions,
+                        mask_pool,
+                        self.param.matcher,
+                    )
+            else:
+                frame = self.set_frame(frame)
+                _, _, f_height, f_width = frame.shape
+                predictions = self.predictor(frame)
+                (feat_masks, seg_masks, boxes, scores, classes,) = self.yolo_process(
+                    predictions, (f_height, f_width), (self.height, self.width)
+                )
+            det_timer.toc()
+            trk_timer.tic()
+            if boxes.any():
+                # TODO: tracking
+                if not self.param.use_ocsort:
+                    (
+                        track_tlwhs,
+                        track_ids,
+                        track_classes,
+                        trk_results,
+                        det_results,
+                    ) = self.deepsort(
+                        frame_copy,
+                        frame_id,
+                        feat_masks,
+                        boxes,
+                        scores,
+                        classes,
+                        trk_results,
+                        det_results,
+                        self.class_names,
+                    )
+                else:
+                    (
+                        assoc_img,
+                        data,
+                        img_v,
+                        track_tlwhs,
+                        track_ids,
+                        track_classes,
+                        trk_results,
+                        det_results,
+                    ) = self.ocsort(
+                        data,
+                        frame_copy,
+                        frame_id,
+                        feat_masks,
+                        seg_masks,
+                        boxes,
+                        scores,
+                        classes,
+                        trk_results,
+                        det_results,
+                        self.class_names,
+                        self.width,
+                    )
+                trk_timer.toc()
+                timer.toc()
+                res_image = self.plot_tracking(
+                    raw_img,
+                    track_tlwhs,
+                    track_ids,
+                    track_classes,
+                    frame_id=frame_id + 1,
+                    fps=1.0 / timer.average_time,
+                )
+                res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
+                for box in boxes:
+                    _, res_image = self.filter_box(box, res_image)
+                cv2.imwrite(res_path, res_image)
+                # Write det lines fro evaluation
+                new_gt_file = open(
+                    os.path.join(self.det_res_dir, f"{frame_id:06d}.txt"), "w"
+                )
+                new_gt_file.writelines(det_results)
+                new_gt_file.close()  # to change file access modes
+
+            # except Exception as e:
+            #     print(e)
+        else:
+            res_image = raw_img
+
+        if self.param.config.is_save_result:
+            vid_writer.write(res_image)
+            iou_path = os.path.join(self.data_attr, f"{frame_id}.jpg")
+            if img_v.any():
+                # Stack the images horizontally
+                stacked_image = cv2.hconcat([img_v, res_image])
+                cv2.imwrite(iou_path, stacked_image)
+
+        return data, det_results, trk_results
+
+    def process(self):
         # current_time = time.localtime()
         # timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
         if self.param.config.is_save_result:
-            save_path = os.path.join(self.det_dir, f"{basename}.mp4")
+            save_path = os.path.join(self.det_dir, f"{self.basename}.mp4")
             self.logger.info(f"video save_path is {save_path}")
             vid_writer = cv2.VideoWriter(
                 save_path,
                 cv2.VideoWriter_fourcc(*"mp4v"),
                 self.fps,
-                (int(width), int(height)),
+                (int(self.width), int(self.height)),
             )
 
-        frame_id = 0
         if not self.param.use_ocsort:
             metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
             self._tracker = tracker.Tracker(metric)
@@ -831,162 +995,69 @@ class VideoProcessor:
                 max_age=self.param.max_age,
                 min_hits=self.param.min_hits,
                 out_folder=self.data_assoc,
-                )
+            )
+
         timer = Timer()
         det_timer = Timer()
         trk_timer = Timer()
         frame_id = 0
+        det_results = []
         trk_results = []
         data = []
-        frame_count = len(self.video)
-        prog_bar = ProgressBar(int(frame_count), fmt=ProgressBar.FULL)
-
-        # while True:
-        for image in self.video:
-            basename, _ = os.path.splitext(os.path.basename(image))
-            frame_id = int(basename.replace("img", "")) - 1
-            if frame_id % self.fps == 0:
-                self.logger.info(
-                    "Processing frame {} ({:.2f} fps)".format(
-                        frame_id, 1.0 / max(1e-5, timer.average_time)
+        prog_bar = ProgressBar(int(self.num_frames), fmt=ProgressBar.FULL)
+        if self.param.config.image_path:
+            for image in self.video:
+                basename, _ = os.path.splitext(os.path.basename(image))
+                frame_id = int(basename.replace("img", "")) - 1
+                if frame_id % self.fps == 0:
+                    self.logger.info(
+                        "Processing frame {} ({:.2f} fps)".format(
+                            frame_id, 1.0 / max(1e-5, timer.average_time)
+                        )
                     )
+                frame = cv2.imread(image)
+                data, det_results, trk_results = self.perform_task(
+                    frame,
+                    frame_id,
+                    data,
+                    det_results,
+                    trk_results,
+                    timer,
+                    det_timer,
+                    trk_timer,
+                    vid_writer,
                 )
-            frame = cv2.imread(image)
-            # if ret_val:
-            raw_img = frame
-            frame_copy = frame.copy()
-            det_results = []
-            timer.tic()
-            if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
-                det_timer.tic()
-                hooker = self.set_hooker()
-                try:
-                    if not is_yolo:
-                        predictions = self.predictor(frame)
-                        predictions = predictions["instances"].to(torch.device("cpu"))
-
-                        if hooker and self.param.matcher is None:
-                            mask_pool = hooker.outputs[-1].cpu()
-                            hooker.remove()
-                        else:
-                            mask_pool = None
-                        if predictions:
-                            (
-                                feat_masks,
-                                seg_masks,
-                                boxes,
-                                scores,
-                                classes,
-                            ) = self.det2_process(
-                                predictions,
-                                mask_pool,
-                                self.param.matcher,
-                            )
-
-                    else:
-                        frame = self.set_frame(frame)
-                        _, _, f_height, f_width = frame.shape
-                        predictions = self.predictor(frame)
-                        (
-                            feat_masks,
-                            seg_masks,
-                            boxes,
-                            scores,
-                            classes,
-                        ) = self.yolo_process(
-                            predictions, (f_height, f_width), (height, width)
-                        )
-                    det_timer.toc()
-                    trk_timer.tic()
-                    if boxes.any():
-                        # TODO: tracking
-                        if not self.param.use_ocsort:
-                            (
-                                track_tlwhs,
-                                track_ids,
-                                track_classes,
-                                trk_results,
-                                det_results,
-                            ) = self.deepsort(
-                                frame_copy,
-                                frame_id,
-                                feat_masks,
-                                boxes,
-                                scores,
-                                classes,
-                                trk_results,
-                                det_results,
-                                self.class_names,
-                            )
-                        else:
-                            (   
-                                assoc_img,
-                                data,
-                                img_v,
-                                track_tlwhs,
-                                track_ids,
-                                track_classes,
-                                trk_results,
-                                det_results,
-                            ) = self.ocsort(
-                                data,
-                                frame_copy,
-                                frame_id,
-                                feat_masks,
-                                seg_masks,
-                                boxes,
-                                scores,
-                                classes,
-                                trk_results,
-                                det_results,
-                                self.class_names,
-                                width,
-                            )
-                        trk_timer.toc()
-                        timer.toc()
-                        res_image = self.plot_tracking(
-                            raw_img,
-                            track_tlwhs,
-                            track_ids,
-                            track_classes,
-                            frame_id=frame_id + 1,
-                            fps=1.0 / timer.average_time,
-                        )
-                        res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
-                        for box in boxes:
-                            _, res_image = self.filter_box(box, res_image)
-                        cv2.imwrite(res_path, res_image)
-                        # Write det lines fro evaluation
-                        new_gt_file = open(
-                            os.path.join(self.det_dir, f"{frame_id:06d}.txt"), "w"
-                        )
-                        new_gt_file.writelines(det_results)
-                        new_gt_file.close()  # to change file access modes
-
-                except Exception as e:
-                    print(e)
+                # Update progress bar
+                prog_bar.current += 1
+                prog_bar()
+        else:
+            frame_id = 0
+            while True:
+                ret_val, frame = self.video.read()
+                if ret_val:
+                    data, det_results, trk_results = self.perform_task(
+                        frame,
+                        frame_id,
+                        data,
+                        det_results,
+                        trk_results,
+                        timer,
+                        det_timer,
+                        trk_timer,
+                        vid_writer,
+                    )
                 else:
-                    res_image = raw_img
-                if self.param.config.is_save_result:
-                    vid_writer.write(res_image)
-                    iou_path = os.path.join(self.data_attr, f"{frame_id}.jpg")
-                    if img_v.any():
-                        # Stack the images horizontally
-                        stacked_image = cv2.hconcat([img_v, res_image])
-                        cv2.imwrite(iou_path, stacked_image)
-            # else:
-            #     timer.toc()
-            #     self.logger.info(f"Average Time: {timer.average_time}")
-            #     self.logger.info(f"Total Time: {timer.total_time}")
-            #     self.logger.info(
-            #         f"Time: {det_timer.total_time}, {det_timer.average_time}, {trk_timer.total_time}, {trk_timer.average_time}, {timer.total_time}, {timer.average_time}"
-            #     )
-            #     break
-            # frame_id += 1
-
-            # Update progress bar
-            prog_bar.current += 1
-            prog_bar()
+                    timer.toc()
+                    self.logger.info(f"Average Time: {timer.average_time}")
+                    self.logger.info(f"Total Time: {timer.total_time}")
+                    self.logger.info(
+                        f"Time: {det_timer.total_time}, {det_timer.average_time}, {trk_timer.total_time}, {trk_timer.average_time}, {timer.total_time}, {timer.average_time}"
+                    )
+                    break
+                frame_id += 1
+                # Update progress bar
+                prog_bar.current += 1
+                prog_bar()
         prog_bar.done()
 
         if self.param.config.is_save_result:
@@ -995,25 +1066,28 @@ class VideoProcessor:
                 f.writelines(trk_results)
             self.logger.info(f"save trk_results to {res_file}")
 
-
         # Specify the CSV file path
-        csv_file = os.path.join(self.data_attr, "output.csv")
-        # Extract the field names from the first dictionary
-        fieldnames = data[0].keys()
-        # Open the CSV file in write mode
-        with open(csv_file, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames)
-            # Write the header row
-            writer.writeheader()
-            # Write the rows to the CSV file
-            writer.writerows(data)
-        print("CSV file created successfully.")
+        try:
+            csv_file = os.path.join(self.data_attr, "output.csv")
+            # Extract the field names from the first dictionary
+            fieldnames = data[0].keys()
+            # Open the CSV file in write mode
+            with open(csv_file, "w", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames)
+                # Write the header row
+                writer.writeheader()
+                # Write the rows to the CSV file
+                writer.writerows(data)
+            print("CSV file created successfully.")
+        except Exception as e:
+            print(e)
+
 
 def start_process(param, is_yolo=False):
     param.set_text_filename()
     param.set_useocsort_feat()
     processor = VideoProcessor(param, is_yolo)
-    processor.process(is_yolo)
+    processor.process()
     close_logging(processor.logger)
 
 
@@ -1022,51 +1096,48 @@ if __name__ == "__main__":
     parser.add_argument("--batch", action="store_true", help="if batch ")
     args = parser.parse_args()
     is_yolo = False
-    xml_files = sorted(glob("/media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/ua_detract/annotations/*.xml"))
-    for xml_file in xml_files:
-        filename, _ = os.path.splitext(os.path.basename(xml_file))
-        param = ParameterManager("configs/demo_config.yaml", filename)
-        if args.batch:
-            for frame_use in [5,25]:
-                # for value in [10,30,50]:
-                #     param.max_age = value
-                param.frame_use = frame_use
-                for predictor in ["SOLOV2"]:
-                    param.predictor_name = predictor.upper()
-                    param.config.predictor = param.predictor_name
-                    if param.predictor_name == "SOLOV2":
-                        param.config.config_file = "configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml"
-                        param.config.weight_file = "checkpoints/SOLOv2_R50_3x.pth"
-                    elif param.predictor_name == "MASKRCNN":
-                        param.config.config_file = (
-                            "configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml"
-                        )
-                        param.config.weight_file = "checkpoints/MaskRCNN_R50_3x.pkl"
-                    elif param.predictor_name == "FASTERRCNN":
-                        param.config.config_file = (
-                            "configs/MaskRCNN/FasterRCNN_R50_FPN_3x.yaml"
-                        )
-                        param.config.weight_file = "checkpoints/FasterRCNN_R50_3x.pkl"
-                    elif param.predictor_name == "YOLOV7":
-                        is_yolo = True
-                        param.config.config_file = "configs/YOLOv7_Mask.yaml"
-                        param.config.weight_file = "checkpoints/YOLOv7_Mask.pt"
-                    for tracker_name in ["MASKOCSORT"]:
-                        param.tracker_name = tracker_name.upper()
-                        if tracker_name == "MASKOCSORT":
-                            matchers = [None]
-                        else:
-                            matchers = ["COSINESL"]
-                        for matcher in matchers:
-                            param.matcher = matcher
-                            print(
-                                f"Processing... Tracker: {param.tracker_name}, Predictor: {param.predictor_name}, Matcher: {param.matcher} Frame Use: {param.frame_use}"
-                            )
-                            start_process(param, is_yolo)
-                            print()
-                    is_yolo = False
+    param = ParameterManager("configs/demo_config.yaml")
+    if args.batch:
+        main_folder = param.config.image_path
+        # for subdir in os.listdir(main_folder):
+        #     param.config.image_path = os.path.join(main_folder, subdir)
+        for frame_use in [1, 5, 25]:
+            param.frame_use = frame_use
+            for predictor in ["SOLOV2"]:
+                param.predictor_name = predictor.upper()
+                param.config.predictor = param.predictor_name
+                if param.predictor_name == "SOLOV2":
+                    param.config.config_file = "configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml"
+                    param.config.weight_file = "checkpoints/SOLOv2_R50_3x.pth"
+                elif param.predictor_name == "MASKRCNN":
+                    param.config.config_file = (
+                        "configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml"
+                    )
+                    param.config.weight_file = "checkpoints/MaskRCNN_R50_3x.pkl"
+                elif param.predictor_name == "FASTERRCNN":
+                    param.config.config_file = (
+                        "configs/MaskRCNN/FasterRCNN_R50_FPN_3x.yaml"
+                    )
+                    param.config.weight_file = "checkpoints/FasterRCNN_R50_3x.pkl"
+                elif param.predictor_name == "YOLOV7":
+                    is_yolo = True
+                    param.config.config_file = "configs/YOLOv7_Mask.yaml"
+                    param.config.weight_file = "checkpoints/YOLOv7_Mask.pt"
+                for tracker_name in ["DEEPSORT"]:
+                    param.tracker_name = tracker_name.upper()
+                    if tracker_name in ["MASKOCSORT", "OCSORT"]:
+                        matcher = None
+                    else:
+                        matcher = "COSINESL"
+                    param.matcher = matcher
+                    print(
+                        f"Processing... Tracker: {param.tracker_name}, Predictor: {param.predictor_name}, Matcher: {param.matcher} Frame Use: {param.frame_use}"
+                    )
+                    start_process(param, is_yolo)
+                    print()
+                is_yolo = False
     else:
-        param = ParameterManager("configs/demo_config.yaml", None)
+        param = ParameterManager("configs/demo_config.yaml")
         param.predictor_name = param.config.predictor.upper()
         param.tracker_name = param.config.tracker.upper()
         if param.predictor_name == "YOLOV7":
