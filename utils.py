@@ -194,6 +194,7 @@ def get_IOP(roi, bbox):
 
     return interArea / bboxArea
 
+
 def calculate_iou(box1, box2):
     """
     Calculate the Intersection over Union (IoU) between two bounding boxes.

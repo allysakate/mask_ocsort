@@ -138,6 +138,7 @@ class KalmanBoxTracker(object):
         self.hits = 0
         self.hit_streak = 0
         self.age = 0
+        self.conf_score = 0
         self.category = -1
         # bbox[4], score, category
         self.feature = np.array([0.01] * (length - 6))
@@ -160,7 +161,7 @@ class KalmanBoxTracker(object):
         Updates the state vector with observed bbox.
         """
         if bbox is not None:
-            if self.last_observation[:5].sum() >= 0:  # no previous observation
+            if self.last_observation[:4].sum() >= 0:  # no previous observation
                 previous_box = None
                 for i in range(self.delta_t):
                     dt = self.delta_t - i
@@ -182,6 +183,7 @@ class KalmanBoxTracker(object):
             self.last_observation = bbox
             self.observations[self.age] = bbox
             self.history_observations.append(bbox)
+            self.conf_score = bbox[4]
             self.category = bbox[5]
             self.feature = bbox[6:]
 
@@ -263,7 +265,16 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, data, frame_id, raw_img, dets, with_feature=False, desc_matcher=None, width=1920):
+    def update(
+        self,
+        data,
+        frame_id,
+        raw_img,
+        dets,
+        with_feature=False,
+        desc_matcher=None,
+        width=1920,
+    ):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score,class],[x1,y1,x2,y2,score,class],...]
@@ -282,7 +293,7 @@ class OCSort(object):
         for t, trk in enumerate(trks):
             pos = self.trackers[t].predict()[0]
             pos_holder = [0] * length
-            pos_holder[:4] = [pos[0], pos[1], pos[2], pos[3], 0, 0]
+            pos_holder[:4] = [pos[0], pos[1], pos[2], pos[3]]
             pos_holder[6:] = self.trackers[t].feature
             trk[:] = pos_holder
             if np.any(np.isnan(pos)):
@@ -390,16 +401,17 @@ class OCSort(object):
                 # ) and not trk.is_drop:
                 # +1 as MOT benchmark requires positive
                 trk_dets.append(d)
-                result = np.insert(d, 4, trk.category)
+                result = np.insert(d, 4, trk.conf_score)
+                result = np.insert(result, 5, trk.category)
                 ret.append(np.concatenate((result, [trk.id + 1])).reshape(1, -1))
             i -= 1
             # remove dead tracklet
             if trk.time_since_update > self.max_age:
-            # if trk.time_since_update > self.max_age or (
-            #     with_feature
-            #     and trk.time_since_update > self.max_age / 3
-            #     and trk.is_drop
-            # ):
+                # if trk.time_since_update > self.max_age or (
+                #     with_feature
+                #     and trk.time_since_update > self.max_age / 3
+                #     and trk.is_drop
+                # ):
                 self.trackers.pop(i)
 
         trk_dets = np.array(trk_dets)
@@ -412,6 +424,7 @@ class OCSort(object):
                     is_new = False
             if is_new:
                 trk = KalmanBoxTracker(dets[i, :], delta_t=self.delta_t, length=length)
+                trk.conf_score = dets[i, 4]
                 trk.category = dets[i, 5]
                 trk.feature = dets[i, 6:]
                 self.trackers.append(trk)

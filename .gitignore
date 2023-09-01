@@ -135,10 +135,10 @@ dmypy.json
 *.webm
 *.txt
 
-# # Models
-# *.pth
-# *.pkl
-# *.pt
+# Models
+*.pth
+*.pkl
+*.pt
 
 # Logs
 /logs

@@ -17,10 +17,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 
-try:
-    import thop  # for FLOPS computation
-except ImportError:
-    thop = None
+# try:
+#     import thop  # for FLOPS computation
+# except ImportError:
+#     thop = None
 logger = logging.getLogger(__name__)
 
 
@@ -133,10 +133,10 @@ def profile(x, ops, n=100, device=None):
             else m
         )  # type
         dtf, dtb, t = 0.0, 0.0, [0.0, 0.0, 0.0]  # dt forward, backward
-        try:
-            flops = thop.profile(m, inputs=(x,), verbose=False)[0] / 1e9 * 2  # GFLOPS
-        except Exception:
-            flops = 0
+        # try:
+        #     flops = thop.profile(m, inputs=(x,), verbose=False)[0] / 1e9 * 2  # GFLOPS
+        # except Exception:
+        flops = 0
 
         for _ in range(n):
             t[0] = time_synchronized()

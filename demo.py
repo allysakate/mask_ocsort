@@ -2,6 +2,7 @@ import os
 import csv
 import math
 import yaml
+import json
 import argparse
 from typing import List
 from functools import reduce
@@ -10,6 +11,7 @@ import torch.nn as nn
 from torchvision import transforms
 import cv2
 import numpy as np
+from skimage import measure
 from glob import glob
 from torchvision.ops import masks_to_boxes
 from detectron2.engine.defaults import DefaultPredictor
@@ -680,6 +682,7 @@ class VideoProcessor:
         scores,
         classes,
         trk_results,
+        trk_dict,
         det_results,
         class_names,
         width,
@@ -734,8 +737,9 @@ class VideoProcessor:
             assoc_img = raw_img
             targets = []
         track_tlwhs = []
-        track_ids = []
+        track_scores = []
         track_classes = []
+        track_ids = []
         for tlbrs in targets:
             box_width = tlbrs[2] - tlbrs[0]
             box_height = tlbrs[3] - tlbrs[1]
@@ -745,8 +749,9 @@ class VideoProcessor:
                 tlbrs[2] - tlbrs[0],
                 tlbrs[3] - tlbrs[1],
             ]
-            tid = tlbrs[5]
-            tclass = int(tlbrs[4])
+            tscore = tlbrs[4]
+            tclass = int(tlbrs[5])
+            tid = tlbrs[6]
             # vertical = box_width / box_height > self.param.config._aspect_ratio_thresh
             if (
                 box_width * box_height
@@ -755,12 +760,24 @@ class VideoProcessor:
             ):
                 track_tlwhs.append(tlwh)
                 track_ids.append(tid)
+                track_scores.append(tscore)
                 if tclass in self.param.config.class_list:
                     track_classes.append(class_names[tclass])
                 else:
                     track_classes.append(None)
                 trk_results.append(
-                    f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
+                    f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{round(tscore, 2)},-1,-1,-1\n"
+                )
+                if tid not in trk_dict:
+                    trk_dict[tid] = []
+                trk_dict[tid].append(
+                    [
+                        frame_id,
+                        int(tlbrs[0]),
+                        int(tlbrs[1]),
+                        int(tlbrs[2]),
+                        int(tlbrs[3]),
+                    ]
                 )
 
         return (
@@ -771,6 +788,7 @@ class VideoProcessor:
             track_ids,
             track_classes,
             trk_results,
+            trk_dict,
             det_results,
         )
 
@@ -841,6 +859,22 @@ class VideoProcessor:
                 )
         return track_tlwhs, track_ids, track_classes, trk_results, det_results
 
+    def mask_to_polygon(self, seg_masks, scores, boxes, frame_id):
+        """Converts binary mask to polygon
+        https://github.com/cocodataset/cocoapi/issues/131
+        """
+        segm_list, conf_list, box_list = [], [], []
+        for segm, score, box in zip(seg_masks, scores, boxes):
+            binary_mask = np.array(segm.detach().cpu().numpy(), dtype=np.uint8)
+            contours = measure.find_contours(binary_mask, 0.5)
+            for contour in contours:
+                contour = np.flip(contour, axis=1)
+                segmentation = contour.ravel().tolist()
+                segm_list.append(segmentation)
+                conf_list.append(score)
+                box_list.append([frame_id] + list(box.detach().cpu().numpy()))
+        return segm_list, sum(conf_list) / len(conf_list), box_list
+
     def perform_task(
         self,
         frame,
@@ -848,6 +882,8 @@ class VideoProcessor:
         data,
         det_results,
         trk_results,
+        segm_dict,
+        trk_dict,
         timer,
         det_timer,
         trk_timer,
@@ -890,6 +926,12 @@ class VideoProcessor:
                 (feat_masks, seg_masks, boxes, scores, classes,) = self.yolo_process(
                     predictions, (f_height, f_width), (self.height, self.width)
                 )
+            segmentations, conf_score, segm_boxes = self.mask_to_polygon(
+                seg_masks, scores, boxes, frame_id
+            )
+            segm_dict["box"].append(segm_boxes)
+            segm_dict["segm"].append(segmentations)
+            segm_dict["conf"].append(conf_score)
             det_timer.toc()
             trk_timer.tic()
             if boxes.any():
@@ -921,6 +963,7 @@ class VideoProcessor:
                         track_ids,
                         track_classes,
                         trk_results,
+                        trk_dict,
                         det_results,
                     ) = self.ocsort(
                         data,
@@ -932,6 +975,7 @@ class VideoProcessor:
                         scores,
                         classes,
                         trk_results,
+                        trk_dict,
                         det_results,
                         self.class_names,
                         self.width,
@@ -969,8 +1013,7 @@ class VideoProcessor:
                 # Stack the images horizontally
                 stacked_image = cv2.hconcat([img_v, res_image])
                 cv2.imwrite(iou_path, stacked_image)
-
-        return data, det_results, trk_results
+        return data, det_results, trk_results, segm_dict, trk_dict
 
     def process(self):
         # current_time = time.localtime()
@@ -1003,6 +1046,8 @@ class VideoProcessor:
         frame_id = 0
         det_results = []
         trk_results = []
+        trk_dict = {}
+        segm_dict = {"box": [], "conf": [], "segm": []}
         data = []
         prog_bar = ProgressBar(int(self.num_frames), fmt=ProgressBar.FULL)
         if self.param.config.image_path:
@@ -1016,12 +1061,14 @@ class VideoProcessor:
                         )
                     )
                 frame = cv2.imread(image)
-                data, det_results, trk_results = self.perform_task(
+                data, det_results, trk_results, segm_dict, trk_dict = self.perform_task(
                     frame,
                     frame_id,
                     data,
                     det_results,
                     trk_results,
+                    segm_dict,
+                    trk_dict,
                     timer,
                     det_timer,
                     trk_timer,
@@ -1035,17 +1082,28 @@ class VideoProcessor:
             while True:
                 ret_val, frame = self.video.read()
                 if ret_val:
-                    data, det_results, trk_results = self.perform_task(
-                        frame,
-                        frame_id,
-                        data,
-                        det_results,
-                        trk_results,
-                        timer,
-                        det_timer,
-                        trk_timer,
-                        vid_writer,
-                    )
+                    try:
+                        (
+                            data,
+                            det_results,
+                            trk_results,
+                            segm_dict,
+                            trk_dict,
+                        ) = self.perform_task(
+                            frame,
+                            frame_id,
+                            data,
+                            det_results,
+                            trk_results,
+                            segm_dict,
+                            trk_dict,
+                            timer,
+                            det_timer,
+                            trk_timer,
+                            vid_writer,
+                        )
+                    except TypeError:
+                        print(f"Error in frame: {frame_id}")
                 else:
                     timer.toc()
                     self.logger.info(f"Average Time: {timer.average_time}")
@@ -1065,6 +1123,54 @@ class VideoProcessor:
             with open(res_file, "w") as f:
                 f.writelines(trk_results)
             self.logger.info(f"save trk_results to {res_file}")
+
+            ids_to_remove = []
+            for track_id, tlbrs in trk_dict.items():
+                dy = tlbrs[-1][2] - tlbrs[0][2]
+                dx = tlbrs[-1][1] - tlbrs[0][1]
+                length = np.sqrt(dx * dx + dy * dy)
+                if length < 30:
+                    ids_to_remove.append(track_id)
+
+            for track_id in ids_to_remove:
+                del trk_dict[track_id]
+
+            segm_to_remove = []
+            segm_boxes = segm_dict["box"]
+            for track_id, ftlbrs in trk_dict.items():
+                for ftlbr in ftlbrs:
+                    for s_idx, segm_box in enumerate(segm_boxes):
+                        if segm_box[0] == ftlbr[0]:
+                            segm_intbox = list(map(int, segm_box[1:]))
+                            trk_intbox = list(map(int, ftlbr[1:]))
+                            iop = calculate_iou(segm_intbox, trk_intbox)
+                            if iop < 0.8:
+                                segm_to_remove.append(s_idx)
+
+            segm_file = os.path.join(
+                self.output_dir, f"{self.param.text_filename}.json"
+            )
+            init_segm_points = segm_dict["segm"]
+            index_mask = [True] * len(init_segm_points)
+            for idx in sorted(segm_to_remove):
+                index_mask[idx] = False
+            segm_points = [
+                value
+                for value, mask_value in zip(init_segm_points, index_mask)
+                if mask_value
+            ]
+            # init_conf_scores = np.array(segm_dict["conf"])
+            # conf_scores = list(init_conf_scores[np.array(index_mask)])
+            # # Create pairs of elements from the first and second lists
+            # pairs = list(zip(conf_scores, segm_points))
+            # # Sort the pairs based on the first list in reverse order
+            # sorted_pairs = sorted(pairs, key=lambda x: x[0], reverse=True)
+            # # Extract the second list elements from the sorted pairs
+            # # Get best 10
+            # best_segm = [pair[1] for pair in sorted_pairs][:10]
+            # Write the dictionary to the file as JSON
+            with open(segm_file, "w", encoding="utf-8") as file:
+                json.dump(segm_points, file)
 
         # Specify the CSV file path
         try:

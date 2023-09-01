@@ -8,10 +8,10 @@ config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 # checkpoints/SOLOv2_R50_3x.pth checkpoints/MaskRCNN_R50_3x.pkl checkpoints/YOLOv7_Mask.pt
 weight_file : checkpoints/SOLOv2_R50_3x.pth
 is_save_result : True
-frame_use : 1
-video_path : /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/APMC/task_ch08af_20190804170000-1/videos/ch08af_20190804170000-1.mp4
+frame_use : 5
+video_path : /home/catchall/Documents/thesis/calibration/data/videos/D01_20230514063405_1.mp4
 image_path : # /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/UADetrac/images
-output_dir :  /media/catchall/OneTouch/1_PhD/Dissertation/Scripts/TrackEval/data/trackers/apmc
+output_dir :  /home/catchall/Documents/thesis/calibration/data/trackers/D01_20230514063405_1
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 class_list : [2]
 # class_list : [2]
