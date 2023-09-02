@@ -2,6 +2,7 @@ import os
 import yaml
 import logging
 from datetime import datetime
+import numpy as np
 
 
 colors_instance = [
@@ -227,3 +228,127 @@ def calculate_iou(box1, box2):
     iou = intersection_area / union_area
 
     return iou
+
+
+def calculate_range_output(height, width, overhead_hmatrix, opt=False, verbose=False):
+    """Adjust the perspective matrix to correspond to the transformed image size"""
+    range_u = np.array([np.inf, -np.inf])
+    range_v = np.array([np.inf, -np.inf])
+
+    i = 0
+    j = 0
+    u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
+    u = u / w
+    v = v / w
+    out_upperpixel = v
+    if verbose:
+        print(u, v)
+    range_u[0] = min(u, range_u[0])
+    range_v[0] = min(v, range_v[0])
+    range_u[1] = max(u, range_u[1])
+    range_v[1] = max(v, range_v[1])
+    i = height - 1
+    j = 0
+    u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
+    u = u / w
+    v = v / w
+    out_lowerpixel = v
+    if verbose:
+        print(u, v)
+    range_u[0] = min(u, range_u[0])
+    range_v[0] = min(v, range_v[0])
+    range_u[1] = max(u, range_u[1])
+    range_v[1] = max(v, range_v[1])
+    i = 0
+    j = width - 1
+    u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
+    u = u / w
+    v = v / w
+    if verbose:
+        print(u, v)
+    range_u[0] = min(u, range_u[0])
+    range_v[0] = min(v, range_v[0])
+    range_u[1] = max(u, range_u[1])
+    range_v[1] = max(v, range_v[1])
+    i = height - 1
+    j = width - 1
+    u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
+    u = u / w
+    v = v / w
+    if verbose:
+        print(u, v)
+    range_u[0] = min(u, range_u[0])
+    range_v[0] = min(v, range_v[0])
+    range_u[1] = max(u, range_u[1])
+    range_v[1] = max(v, range_v[1])
+
+    range_u = np.array(range_u, dtype=np.int32)
+    range_v = np.array(range_v, dtype=np.int32)
+
+    if out_upperpixel > out_lowerpixel and opt:
+
+        # range_v needs to be updated
+        max_height = range_v[1]
+        upper_range = out_lowerpixel
+        best_lower = (
+            upper_range  # since out_lowerpixel was lower value than out_upperpixel
+        )
+        #                           i.e. above in image than out_lowerpixel
+        x_best_lower = np.inf
+        x_best_upper = -np.inf
+
+        for steps_h in range(2, height):
+            temp = np.dot(
+                overhead_hmatrix,
+                np.vstack(
+                    (
+                        np.arange(0, width),
+                        np.ones((1, width)) * (height - steps_h),
+                        np.ones((1, width)),
+                    )
+                ),
+            )
+            temp = temp / temp[2, :]
+
+            lower_range = temp.min(axis=1)[1]
+            x_lower_range = temp.min(axis=1)[0]
+            x_upper_range = temp.max(axis=1)[0]
+            if x_lower_range < x_best_lower:
+                x_best_lower = x_lower_range
+            if x_upper_range > x_best_upper:
+                x_best_upper = x_upper_range
+
+            if (
+                upper_range - lower_range
+            ) > max_height:  # enforcing max_height of destination image
+                lower_range = upper_range - max_height
+                break
+            if lower_range > upper_range:
+                lower_range = best_lower
+                break
+            if lower_range < best_lower:
+                best_lower = lower_range
+            if verbose:
+                print(steps_h, lower_range, x_best_lower, x_best_upper)
+        range_v = np.array([lower_range, upper_range], dtype=np.int32)
+
+        # for testing
+        range_u = np.array([x_best_lower, x_best_upper], dtype=np.int32)
+
+    return range_u, range_v
+
+
+def get_scaled_matrix(
+    homo_matrix, target_shape, estimated_xrange, estimated_yrange, strict=False
+):
+    current_height = estimated_yrange[1] - estimated_yrange[0]
+    current_width = estimated_xrange[1] - estimated_xrange[0]
+    x_scale, y_scale = target_shape[0] / current_width, target_shape[1] / current_height
+    print("x_scale, y_scale ", x_scale, y_scale)
+    if strict:
+        scale = min(x_scale, y_scale)
+        scaling_matrix = np.array([[scale, 0, 0], [0, scale, 0], [0, 0, 1]])
+    else:
+        scaling_matrix = np.array([[x_scale, 0, 0], [0, y_scale, 0], [0, 0, 1]])
+    scaled_homo = np.dot(scaling_matrix, homo_matrix)
+    return scaled_homo

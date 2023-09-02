@@ -11,7 +11,13 @@ from diamond_space import DiamondSpace
 from sklearn.linear_model import RANSACRegressor
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.data import MetadataCatalog
-from utils import get_config, colors_instance, create_output
+from utils import (
+    get_config,
+    colors_instance,
+    create_output,
+    calculate_range_output,
+    get_scaled_matrix,
+)
 from models.config import get_cfg
 
 warnings.filterwarnings("ignore")
@@ -43,7 +49,7 @@ class VPDetection(object):
         self._img_vps1 = None
         self._img_vps2 = None
         self._img_height = None
-        self._img_weight = None
+        self._img_width = None
         self._out_dir = create_output(config.out_dir)
 
     @property
@@ -371,7 +377,7 @@ class VPDetection(object):
         # Reset principal point if we haven't set it yet
         if self._principal_point is None:
             rows, cols = img.shape[:2]
-            self._img_height, self._img_weight = rows, cols
+            self._img_height, self._img_width = rows, cols
             self._principal_point = np.array([cols / 2.0, rows / 2.0])
 
         # Detect vps
@@ -382,8 +388,6 @@ class VPDetection(object):
             intrinsic_matrix,
             rotation_matrix,
             translation_matrix,
-            scale_matrix,
-            perspective_matrix,
         ) = self.compute_calibration()
         calibration = dict(
             vp1=self.vps_2d[0],
@@ -392,11 +396,9 @@ class VPDetection(object):
             principal_point=self.principal_point,
             road_plane=road_plane,
             focal=self.focal_length,
-            intrinsic_matrix=intrinsic_matrix,
-            rotation_matrix=rotation_matrix,
-            translation_matrix=translation_matrix,
-            perspective_matrix=perspective_matrix,
-            scale_matrix=scale_matrix,
+            intrinsic=intrinsic_matrix,
+            rotation=rotation_matrix,
+            translation=translation_matrix,
         )
         pkl_path = os.path.join(self._out_dir, "calibration.pkl")
         pikd = open(pkl_path, "wb")
@@ -412,137 +414,6 @@ class VPDetection(object):
             intrinsic_matrix: K
             rotation_matrix: R
         """
-
-        def modified_matrices_calculate_range_output_without_translation(
-            height, width, overhead_hmatrix, opt=False, verbose=False
-        ):
-            """
-            调整透视矩阵对应变换后的图像大小
-            :param height:
-            :param width:
-            :param overhead_hmatrix:
-            :param verbose:
-            :return:
-            """
-            range_u = np.array([np.inf, -np.inf])
-            range_v = np.array([np.inf, -np.inf])
-
-            i = 0
-            j = 0
-            u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
-            u = u / w
-            v = v / w
-            out_upperpixel = v
-            if verbose:
-                print(u, v)
-            range_u[0] = min(u, range_u[0])
-            range_v[0] = min(v, range_v[0])
-            range_u[1] = max(u, range_u[1])
-            range_v[1] = max(v, range_v[1])
-            i = height - 1
-            j = 0
-            u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
-            u = u / w
-            v = v / w
-            out_lowerpixel = v
-            if verbose:
-                print(u, v)
-            range_u[0] = min(u, range_u[0])
-            range_v[0] = min(v, range_v[0])
-            range_u[1] = max(u, range_u[1])
-            range_v[1] = max(v, range_v[1])
-            i = 0
-            j = width - 1
-            u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
-            u = u / w
-            v = v / w
-            if verbose:
-                print(u, v)
-            range_u[0] = min(u, range_u[0])
-            range_v[0] = min(v, range_v[0])
-            range_u[1] = max(u, range_u[1])
-            range_v[1] = max(v, range_v[1])
-            i = height - 1
-            j = width - 1
-            u, v, w = np.dot(overhead_hmatrix, [j, i, 1])
-            u = u / w
-            v = v / w
-            if verbose:
-                print(u, v)
-            range_u[0] = min(u, range_u[0])
-            range_v[0] = min(v, range_v[0])
-            range_u[1] = max(u, range_u[1])
-            range_v[1] = max(v, range_v[1])
-
-            range_u = np.array(range_u)
-            range_v = np.array(range_v)
-
-            if out_upperpixel > out_lowerpixel and opt:
-
-                # range_v needs to be updated
-                max_height = range_v[1]
-                upper_range = out_lowerpixel
-                best_lower = upper_range  # since out_lowerpixel was lower value than out_upperpixel
-                #                           i.e. above in image than out_lowerpixel
-                x_best_lower = np.inf
-                x_best_upper = -np.inf
-
-                for steps_h in range(2, height):
-                    temp = np.dot(
-                        overhead_hmatrix,
-                        np.vstack(
-                            (
-                                np.arange(0, width),
-                                np.ones((1, width)) * (height - steps_h),
-                                np.ones((1, width)),
-                            )
-                        ),
-                    )
-                    temp = temp / temp[2, :]
-
-                    lower_range = temp.min(axis=1)[1]
-                    x_lower_range = temp.min(axis=1)[0]
-                    x_upper_range = temp.max(axis=1)[0]
-                    if x_lower_range < x_best_lower:
-                        x_best_lower = x_lower_range
-                    if x_upper_range > x_best_upper:
-                        x_best_upper = x_upper_range
-
-                    if (
-                        upper_range - lower_range
-                    ) > max_height:  # enforcing max_height of destination image
-                        lower_range = upper_range - max_height
-                        break
-                    if lower_range > upper_range:
-                        lower_range = best_lower
-                        break
-                    if lower_range < best_lower:
-                        best_lower = lower_range
-                    if verbose:
-                        print(steps_h, lower_range, x_best_lower, x_best_upper)
-                range_v = np.array([lower_range, upper_range])
-
-                # for testing
-                range_u = np.array([x_best_lower, x_best_upper])
-
-            return range_u, range_v
-
-        def get_scaled_matrix(
-            H, target_shape, estimated_xrange, estimated_yrange, strict=False
-        ):
-            current_height = estimated_yrange[1] - estimated_yrange[0]
-            current_width = estimated_xrange[1] - estimated_xrange[0]
-            x_scale, y_scael = (
-                target_shape[0] / current_width,
-                target_shape[1] / current_height,
-            )
-            if strict:
-                scale = min(x_scale, y_scael)
-                scaling_matrix = np.array([[scale, 0, 0], [0, scale, 0], [0, 0, 1]])
-            else:
-                scaling_matrix = np.array([[x_scale, 0, 0], [0, y_scael, 0], [0, 0, 1]])
-            scaled_H = np.dot(scaling_matrix, H)
-            return scaled_H
 
         vp1_world = np.concatenate((self._vps_2d[0], [self.focal_length]))
         vp2_world = np.concatenate((self._vps_2d[1], [self.focal_length]))
@@ -582,56 +453,17 @@ class VPDetection(object):
             axis=1,
         )
 
-        perspective_matrix = (
-            intrinsic_matrix @ rotation_matrix.T @ np.linalg.inv(intrinsic_matrix)
-        )
-        perspective = perspective_matrix
-        (
-            est_range_u,
-            est_range_v,
-        ) = modified_matrices_calculate_range_output_without_translation(
-            self._img_height,
-            self._img_weight,
-            perspective_matrix,
-            opt=True,
-            verbose=False,
-        )
-        # est_range_u *= 5
-        # est_range_v *= 5
-        moveup_camera = np.array(
-            [[1, 0, -est_range_u[0]], [0, 1, -est_range_v[0]], [0, 0, 1]]
-        )
-        perspective_matrix = np.dot(moveup_camera, perspective_matrix)
-        scale_matrix = get_scaled_matrix(
-            perspective_matrix,
-            [self._img_height, self._img_weight],
-            est_range_u,
-            est_range_v,
-        )
-
-        cemter_height_matrix = np.array(
+        center_height_matrix = np.array(
             [[pp_world[0], pp_world[1], self._camera_height]]
         ).reshape(3, 1)
-        translation_matrix = -rotation_matrix @ cemter_height_matrix
-        return (
-            road_plane,
-            intrinsic_matrix,
-            rotation_matrix,
-            translation_matrix,
-            scale_matrix,
-            perspective,
-        )
+        translation_matrix = -rotation_matrix @ center_height_matrix
 
-
-class Config(object):
-    def __init__(self, data_dict):
-        self.__dict__.update(data_dict)
+        return (road_plane, intrinsic_matrix, rotation_matrix, translation_matrix)
 
 
 class Detection:
-    def __init__(self, config, calib_dict):
+    def __init__(self, config):
         self.config = config
-        self.calib = Config(calib_dict)
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.period_threshold = 0
         self.class_names = None
@@ -772,7 +604,41 @@ class Detection:
             ) = self.detect_process(predictions)
         return boxes, scores, classes
 
-    def draw(self, image, boxes, scores, classes):
+
+class CameraCalibration:
+    def __init__(self, class_names, data_dict):
+        self.class_names = class_names
+        self.height = None
+        self.width = None
+        self.__dict__.update(data_dict)
+        self.perspective_matrix = None
+
+    def load_calibration(self, verbose=False):
+        perspective_matrix = (
+            self.intrinsic @ self.rotation.T @ np.linalg.inv(self.intrinsic)
+        )
+        est_range_u, est_range_v = calculate_range_output(
+            self.height, self.width, perspective_matrix, opt=True, verbose=verbose
+        )
+        moveup_camera = np.array(
+            [[1, 0, est_range_u[1]], [0, 1, est_range_v[1]], [0, 0, 1]]
+        )
+        perspective_matrix = np.dot(moveup_camera, perspective_matrix)
+        scale_matrix = get_scaled_matrix(
+            perspective_matrix,
+            [self.width, self.height],
+            est_range_u,
+            est_range_v,
+            strict=False,
+        )
+        return scale_matrix
+
+    def convert_2d_world(self, x_2d, y_2d):
+        image_coords = np.array([x_2d, y_2d, 1])
+        world_coords = image_coords @ self.perspective_matrix.T
+        return world_coords
+
+    def projector(self, image, boxes, scores, classes):
         text_scale = 1.5
         text_thickness = 2
         line_thickness = 3
@@ -782,15 +648,12 @@ class Detection:
             print(f"{score:.2f}, {class_name}")
 
             intbox = list(map(int, tlbr))
-            x1, y1, x2, y2 = intbox
-            first_point = self.convert_2d_world(x1, y1)
-            second_point = self.convert_2d_world(x2, y2)
+            # x1, y1, x2, y2 = intbox
+            first_point = self.convert_2d_world(1377, 413)
+            # 1377 413, 1001 907
+            second_point = self.convert_2d_world(1001, 907)
+            distance = np.linalg.norm(first_point - second_point)
             print(f"1: {first_point} 2: {second_point}")
-            dx = first_point[0] - second_point[0]
-            dy = first_point[1] - second_point[1]
-            distance = np.sqrt(dx * dx + dy * dy)
-            # print(f"Top-Left: {np.around(first_point, decimals=2)}")
-            # print(f"Bot-Left: {np.around(second_point, decimals=2)}\n")
 
             i_color = colors_instance[idx]
             cv2.rectangle(
@@ -802,36 +665,23 @@ class Detection:
                 (intbox[0], intbox[1] - 5),
                 cv2.FONT_HERSHEY_PLAIN,
                 text_scale,
-                (0, 0, 0),
+                (0, 255, 0),
                 thickness=text_thickness,
             )
         return image
 
-    def convert_2d_world(self, x_2d, y_2d):
-        image_coords = np.array([x_2d, y_2d, 1])
-        scale_world_coords = image_coords @ self.calib.scale_matrix
-        world_coords = image_coords @ self.calib.perspective_matrix
-        pp_w = np.concatenate((self.calib.principal_point, [0]))
-        p_w = np.array([x_2d, y_2d, self.calib.focal])
-        dirVec = p_w - pp_w
-        t = -np.dot(self.calib.road_plane, np.concatenate((pp_w, [1]))) / np.dot(
-            self.calib.road_plane[0:3], dirVec
-        )
-        print("dirVec: ", pp_w + t * dirVec)
-        print("world_coords", world_coords)
-        # points_IPM = points_IPM / points_IPM[:, -1].reshape(-1, 1)
-        return scale_world_coords
-
-    def test_calibration(self, img_path):
+    def test_calibration(self, detect_model, img_path, out_dir):
         """Convert 2D bbox coords from tracker results to world coords
         Sample Data: 160,1.0,1340.00,190.00,273.00,195.00,1.0,-1,-1,-1
         Track data: <frame>, <id>, <bb_left>, <bb_top>, <bb_width>, <bb_height>, <conf>, <x>, <y>, <z>
         """
         image = cv2.imread(img_path)
-        boxes, scores, classes = self.inference(image)
+        self.height, self.width, _ = image.shape
+        self.perspective_matrix = self.load_calibration()
+        boxes, scores, classes = detect_model.inference(image)
         if boxes.any():
-            image = self.draw(image, boxes, scores, classes)
-            infer_path = os.path.join(self.config.out_dir, "inference.jpg")
+            image = self.projector(image, boxes, scores, classes)
+            infer_path = os.path.join(out_dir, "inference.jpg")
             cv2.imwrite(infer_path, image)
 
 
@@ -862,5 +712,7 @@ if __name__ == "__main__":
         calib_dict = pickle.load(file)
         file.close()
 
-        detect = Detection(config, calib_dict)
-        detect.test_calibration(image_path)
+        print(calib_dict)
+        detect = Detection(config)
+        calib = CameraCalibration(class_names=detect.class_names, data_dict=calib_dict)
+        calib.test_calibration(detect, image_path, config.out_dir)
