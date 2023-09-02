@@ -1,3 +1,4 @@
+# MASKOCSORT, OCSORT, DEEPOCSORT, DEEPSORT
 tracker : MASKOCSORT
 # MaskRCNN SOLOv2 YOLOv7
 predictor : SOLOv2
@@ -14,7 +15,6 @@ image_path : # /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/UADetr
 output_dir :  /home/catchall/Documents/thesis/calibration/data/trackers/D01_20230514063405_1
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 class_list : [2]
-# class_list : [2]
 # roi : [[335, 52, 592, 170], [0, 296, 224, 417], [690, 116, 960, 211]]  # UAD
 roi : [[1126, 0, 1918, 200]]  # 1 APMC
 # roi : [883.99, 1.65, 1918.08, 241.23] #2

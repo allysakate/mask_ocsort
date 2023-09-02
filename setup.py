@@ -65,7 +65,7 @@ def get_extensions():
 
 
 setup(
-    name="DeepOCSort",
+    name="MaskOCSORT",
     version="0.0.0",
     author="Allysa Kate Brillantes",
     description="Tracking",
