@@ -13,7 +13,6 @@ OC-Sort Tracker with feature descriptor from instance segmentation
         $ python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
         $ python setup.py develop
         $ pip install -r requirements.txt
-        $ pip install 'git+https://github.com/cocodataset/cocoapi.git#subdirectory=PythonAPI'
 
 3. Install pre-commit and run on all files
 

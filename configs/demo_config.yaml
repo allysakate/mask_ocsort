@@ -10,13 +10,14 @@ config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 weight_file : checkpoints/SOLOv2_R50_3x.pth
 is_save_result : True
 frame_use : 5
-video_path : /home/catchall/Documents/thesis/calibration/data/videos/D01_20230514063405_1.mp4
-image_path : # /media/catchall/OneTouch/1_PhD/Dissertation/Dataset/Public/UADetrac/images
-output_dir :  /home/catchall/Documents/thesis/calibration/data/trackers/D01_20230514063405_1
+video_path : /home/catchall/Videos/D01_20230514220419_003.mp4 # D01_20230514220419_003, D01_20230514075152_004
+image_path : # /home/catchall/Documents/thesis/enhance/image_enhance/D01_20230514220419_003_trial1/DUAL-AUTO
+output_dir :  /home/catchall/Documents/thesis/enhance/data/D01_20230514220419_003
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
-class_list : [2]
+class_list : [1,2,3,5,7]
+roi:
 # roi : [[335, 52, 592, 170], [0, 296, 224, 417], [690, 116, 960, 211]]  # UAD
-roi : [[1126, 0, 1918, 200]]  # 1 APMC
+# roi : [[1126, 0, 1918, 200]]  # 1 APMC
 # roi : [883.99, 1.65, 1918.08, 241.23] #2
 confidence_threshold : 0.5
 iop_threshold : 0.1

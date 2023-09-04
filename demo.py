@@ -179,6 +179,7 @@ class VideoProcessor:
             param.config.output_dir,
             f"{self.basename}-test/{param.tracker_name}/{param.text_filename}",
         )
+        self.raw_dir = create_output(self.det_dir, "raw")
         self.image_dir = create_output(self.det_dir, "images")
         self.data_attr = create_output(self.det_dir, "params")
         self.data_assoc = create_output(self.det_dir, "assoc")
@@ -526,12 +527,12 @@ class VideoProcessor:
                 if not condition:
                     is_included = False
                     break
-        if condition:
-            if frame is not None:
-                intbox = tuple(map(int, box))
-                cv2.rectangle(
-                    frame, intbox[0:2], intbox[2:4], color=(0, 0, 0), thickness=1
-                )
+            if condition:
+                if frame is not None:
+                    intbox = tuple(map(int, box))
+                    cv2.rectangle(
+                        frame, intbox[0:2], intbox[2:4], color=(0, 0, 0), thickness=1
+                    )
         return is_included, frame
 
     def mask2polygon(self, image, masks):
@@ -566,10 +567,15 @@ class VideoProcessor:
         text_thickness = 2
         line_thickness = 3
         im = raw_img.copy()
-        for roi in self.param.config.roi:
-            cv2.rectangle(
-                im, roi[0:2], roi[2:4], color=(255, 255, 255), thickness=line_thickness
-            )
+        if self.param.config.roi:
+            for roi in self.param.config.roi:
+                cv2.rectangle(
+                    im,
+                    roi[0:2],
+                    roi[2:4],
+                    color=(255, 255, 255),
+                    thickness=line_thickness,
+                )
         boxes = []
         for bb in bboxes:
             ret, _ = self.filter_box(bb)
@@ -890,6 +896,8 @@ class VideoProcessor:
         vid_writer,
     ):
         raw_img = frame
+        raw_path = os.path.join(self.raw_dir, f"{frame_id}.jpg")
+        cv2.imwrite(raw_path, raw_img)
         img_v = frame.copy()
         frame_copy = frame.copy()
         res_image = frame.copy()
@@ -1053,7 +1061,7 @@ class VideoProcessor:
         if self.param.config.image_path:
             for image in self.video:
                 basename, _ = os.path.splitext(os.path.basename(image))
-                frame_id = int(basename.replace("img", "")) - 1
+                frame_id = int(basename.replace("img", ""))  # - 1
                 if frame_id % self.fps == 0:
                     self.logger.info(
                         "Processing frame {} ({:.2f} fps)".format(
@@ -1082,28 +1090,28 @@ class VideoProcessor:
             while True:
                 ret_val, frame = self.video.read()
                 if ret_val:
-                    try:
-                        (
-                            data,
-                            det_results,
-                            trk_results,
-                            segm_dict,
-                            trk_dict,
-                        ) = self.perform_task(
-                            frame,
-                            frame_id,
-                            data,
-                            det_results,
-                            trk_results,
-                            segm_dict,
-                            trk_dict,
-                            timer,
-                            det_timer,
-                            trk_timer,
-                            vid_writer,
-                        )
-                    except TypeError:
-                        print(f"Error in frame: {frame_id}")
+                    # try:
+                    (
+                        data,
+                        det_results,
+                        trk_results,
+                        segm_dict,
+                        trk_dict,
+                    ) = self.perform_task(
+                        frame,
+                        frame_id,
+                        data,
+                        det_results,
+                        trk_results,
+                        segm_dict,
+                        trk_dict,
+                        timer,
+                        det_timer,
+                        trk_timer,
+                        vid_writer,
+                    )
+                    # except TypeError:
+                    #     print(f"Error in frame: {frame_id}")
                 else:
                     timer.toc()
                     self.logger.info(f"Average Time: {timer.average_time}")
