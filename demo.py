@@ -342,6 +342,7 @@ class VideoProcessor:
         """
         # num_instances = len(predictions)
         # TODO: Filter out non-vehicle classes
+        feat_masks, seg_masks, frame_boxes, scores, classes = [], [], [], [], []
         classes = (
             predictions.pred_classes.numpy()
             if predictions.has("pred_classes")
@@ -431,7 +432,7 @@ class VideoProcessor:
                 if seg_masks is not None:
                     frame_boxes = masks_to_boxes(seg_masks)
 
-            return feat_masks, seg_masks, frame_boxes, scores, classes
+        return feat_masks, seg_masks, frame_boxes, scores, classes
 
     def plot_tracking(
         self,
@@ -879,7 +880,10 @@ class VideoProcessor:
                 segm_list.append(segmentation)
                 conf_list.append(score)
                 box_list.append([frame_id] + list(box.detach().cpu().numpy()))
-        return segm_list, sum(conf_list) / len(conf_list), box_list
+        if len(conf_list):
+            return segm_list, sum(conf_list) / len(conf_list), box_list
+        else:
+            return [], 0, []
 
     def perform_task(
         self,
@@ -896,13 +900,13 @@ class VideoProcessor:
         vid_writer,
     ):
         raw_img = frame
-        raw_path = os.path.join(self.raw_dir, f"{frame_id}.jpg")
-        cv2.imwrite(raw_path, raw_img)
         img_v = frame.copy()
         frame_copy = frame.copy()
         res_image = frame.copy()
         timer.tic()
         if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
+            raw_path = os.path.join(self.raw_dir, f"{frame_id}.jpg")
+            cv2.imwrite(raw_path, raw_img)
             det_timer.tic()
             hooker = self.set_hooker()
             # try:
@@ -942,7 +946,7 @@ class VideoProcessor:
             segm_dict["conf"].append(conf_score)
             det_timer.toc()
             trk_timer.tic()
-            if boxes.any():
+            if len(boxes):
                 # TODO: tracking
                 if not self.param.use_ocsort:
                     (
@@ -1148,12 +1152,15 @@ class VideoProcessor:
             for track_id, ftlbrs in trk_dict.items():
                 for ftlbr in ftlbrs:
                     for s_idx, segm_box in enumerate(segm_boxes):
-                        if segm_box[0] == ftlbr[0]:
-                            segm_intbox = list(map(int, segm_box[1:]))
-                            trk_intbox = list(map(int, ftlbr[1:]))
-                            iop = calculate_iou(segm_intbox, trk_intbox)
-                            if iop < 0.8:
-                                segm_to_remove.append(s_idx)
+                        if len(segm_box):
+                            if segm_box[0] == ftlbr[0]:
+                                segm_intbox = list(map(int, segm_box[1:]))
+                                trk_intbox = list(map(int, ftlbr[1:]))
+                                iop = calculate_iou(segm_intbox, trk_intbox)
+                                if iop < 0.8:
+                                    segm_to_remove.append(s_idx)
+                        else:
+                            segm_to_remove.append(s_idx)
 
             segm_file = os.path.join(
                 self.output_dir, f"{self.param.text_filename}.json"

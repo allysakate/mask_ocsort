@@ -9,10 +9,10 @@ config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 # checkpoints/SOLOv2_R50_3x.pth checkpoints/MaskRCNN_R50_3x.pkl checkpoints/YOLOv7_Mask.pt
 weight_file : checkpoints/SOLOv2_R50_3x.pth
 is_save_result : True
-frame_use : 5
-video_path : /home/catchall/Videos/D01_20230514220419_003.mp4 # D01_20230514220419_003, D01_20230514075152_004
-image_path : # /home/catchall/Documents/thesis/enhance/image_enhance/D01_20230514220419_003_trial1/DUAL-AUTO
-output_dir :  /home/catchall/Documents/thesis/enhance/data/D01_20230514220419_003
+frame_use : 3
+video_path : # /home/catchall/Videos/D01_202306082023014945_006.mp4 # D01_202306082023014945_006 D01_20230514220419_003, D01_20230514075152_004, ch01_20181213073211_008, ch01_20181213054208_009
+image_path :  /home/catchall/Documents/thesis/enhance/data/D01_202306082023014945_006/pce
+output_dir :  /home/catchall/Documents/thesis/enhance/data/D01_202306082023014945_006/track_pce
 # {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
 class_list : [1,2,3,5,7]
 roi:
