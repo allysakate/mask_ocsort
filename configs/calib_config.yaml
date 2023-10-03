@@ -1,15 +1,15 @@
 root_dir: /home/catchall/Documents/thesis/calibration/data
-image_path: images/vlcsnap-2023-08-23-14h06m47s600.png
-track_path: trackers/D01_20230514063405_1/D01_20230514063405_1-test/MASKOCSORT/data/5FPS.txt
-segm_path: trackers/D01_20230514063405_1/D01_20230514063405_1-test/MASKOCSORT/data/5FPS.json
+image_path: /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/tracking/Calibration/229.jpg
+track_path: track/D01_20230514063405_1/D01_20230514063405_1-test/MASKOCSORT/data/3FPS.txt
+segm_path: track/D01_20230514063405_1/D01_20230514063405_1-test/MASKOCSORT/data/3FPS.json
 length_thresh: 30
-camera_height: 125 # gensan: 3.6576 home: 3.175
+camera_height: 3.175 # gensan: 3.6576 home: 3.175 meters
 min_samples: 10
 seed: 1234
 out_dir: /home/catchall/Documents/thesis/calibration/data/calibration/D01_20230514063405_1
 is_calibrate: False
 config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
 weight_file : checkpoints/SOLOv2_R50_3x.pth
-detect_thresh : 0.6
+detect_thresh : 0.3
 confidence_threshold : 0.5
-classes: ['person'] #, 'bicycle', 'car', 'motorcycle', 'bus', 'truck']
+classes: ['bicycle'] #, 'bicycle', 'car', 'motorcycle', 'bus', 'truck']

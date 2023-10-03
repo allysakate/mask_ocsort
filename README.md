@@ -6,7 +6,7 @@ OC-Sort Tracker with feature descriptor from instance segmentation
 
         $ conda create --name mask_ocsort python=3.8
         $ conda activate mask_ocsort
-        $ conda install pytorch==1.10.1 torchvision==0.11.2 torchaudio==0.10.1 cudatoolkit=11.3 -c pytorch -c conda-forge
+        $ conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch
 
 2. Install [Detectron2](https://github.com/facebookresearch/detectron2) and other dependencies.
 

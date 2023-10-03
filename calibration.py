@@ -11,6 +11,11 @@ from diamond_space import DiamondSpace
 from sklearn.linear_model import RANSACRegressor
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.data import MetadataCatalog
+from vp_calib import (
+    determine_focal_length,
+    calculate_rotation_matrix,
+    # calculate_translation_vector_h,
+)
 from utils import (
     get_config,
     colors_instance,
@@ -414,13 +419,16 @@ class VPDetection(object):
             intrinsic_matrix: K
             rotation_matrix: R
         """
+        vp1_homo = np.concatenate((self._vps_2d[0], [1]))
+        vp2_homo = np.concatenate((self._vps_2d[1], [1]))
+        vps_homo = [vp1_homo, vp2_homo]
+        self._focal_length = determine_focal_length(vps_homo, self._img_vps1)[0]
 
         vp1_world = np.concatenate((self._vps_2d[0], [self.focal_length]))
         vp2_world = np.concatenate((self._vps_2d[1], [self.focal_length]))
         pp_world = np.concatenate((self._principal_point, np.array([0.0])))
         vp1_pp = vp1_world - pp_world
         vp2_pp = vp2_world - pp_world
-        print(vp1_pp, vp2_pp)
         vp3_world = np.cross(vp1_pp, vp2_pp)
         vp3 = vp3_world[0:2] / vp3_world[2] * self.focal_length + pp_world[0:2]
         self._vps_2d.append(vp3)
@@ -444,19 +452,20 @@ class VPDetection(object):
             ]
         )
 
-        rotation_matrix = np.stack(
-            [
-                vp2_pp / np.linalg.norm(vp2_pp),
-                vp1_pp / np.linalg.norm(vp1_pp),
-                vp3_world / np.linalg.norm(vp3_world),
-            ],
-            axis=1,
+        rotation_matrix = calculate_rotation_matrix(
+            vps_homo, self._img_vps1, self._focal_length
         )
+        # translation_matrix = calculate_translation_vector_h(self._img_vps1, self._focal_length, rotation_matrix, pp_world[0], pp_world[1], self._camera_height)
+        translation_matrix = np.array([0, 0, self._camera_height])
 
-        center_height_matrix = np.array(
-            [[pp_world[0], pp_world[1], self._camera_height]]
-        ).reshape(3, 1)
-        translation_matrix = -rotation_matrix @ center_height_matrix
+        # rotation_matrix = np.stack(
+        #     [
+        #         vp2_pp / np.linalg.norm(vp2_pp),
+        #         vp1_pp / np.linalg.norm(vp1_pp),
+        #         vp3_world / np.linalg.norm(vp3_world),
+        #     ],
+        #     axis=1,
+        # )
 
         return (road_plane, intrinsic_matrix, rotation_matrix, translation_matrix)
 
@@ -635,7 +644,12 @@ class CameraCalibration:
 
     def convert_2d_world(self, x_2d, y_2d):
         image_coords = np.array([x_2d, y_2d, 1])
-        world_coords = image_coords @ self.perspective_matrix.T
+        perspective_matrix = self.intrinsic.dot(
+            np.hstack((self.rotation, self.translation.reshape(3, 1)))
+        )
+        # Calculate world coordinates
+        world_coords = np.dot(np.linalg.pinv(perspective_matrix), image_coords)
+        world_coords /= world_coords[-1]  # Normalize by dividing by the last element
         return world_coords
 
     def projector(self, image, boxes, scores, classes):
@@ -649,9 +663,11 @@ class CameraCalibration:
 
             intbox = list(map(int, tlbr))
             # x1, y1, x2, y2 = intbox
-            first_point = self.convert_2d_world(1377, 413)
+            # 1635.,  173., 1683.,  309
+            first_point = self.convert_2d_world(1635, 173)
+            # 5.,  811.,  507., 1070
             # 1377 413, 1001 907
-            second_point = self.convert_2d_world(1001, 907)
+            second_point = self.convert_2d_world(5, 811)
             distance = np.linalg.norm(first_point - second_point)
             print(f"1: {first_point} 2: {second_point}")
 
@@ -661,7 +677,7 @@ class CameraCalibration:
             )
             cv2.putText(
                 image,
-                f"H: {distance:.2f} {score:.2f}, {class_name}",
+                f"D: {distance:.2f} {score:.2f}, {class_name}",
                 (intbox[0], intbox[1] - 5),
                 cv2.FONT_HERSHEY_PLAIN,
                 text_scale,
