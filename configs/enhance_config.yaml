@@ -1,0 +1,11 @@
+predictor : SOLOv2
+config_file : configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml
+weight_file : checkpoints/SOLOv2_R50_3x.pth
+frame_use : all
+video_path :  # /home/catchall/Videos/D01_20230608014937.mp4
+image_path :  /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/enhance/D01_20230608014937/orig/
+output_dir :  /media/catchall/OneTouch/1_PhD/Dissertation/Evaluation/enhance/D01_20230608014937/True_/
+# {0: person, 1: bicycle, 2: car, 3: motorcycle, 4: airplane, 5: bus, 6: train, 7: truck}
+class_list : [1, 2, 3, 4, 5, 7]
+confidence_threshold : 0.5
+mask_thresh : 0.3
