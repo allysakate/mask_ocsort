@@ -36,3 +36,11 @@ OC-Sort Tracker with feature descriptor from instance segmentation
 2. https://github.com/facebookresearch/detectron2
 3. https://github.com/WongKinYiu/yolov7
 4. https://github.com/nwojke/deep_sort
+
+
+## Citation
+If you find this work useful, please consider to cite our paper:
+
+[1] A. K. Brillantes, E. Sybingco, A. Bandala, R. K. Billones, A. Fillone, and E. Dadios, “Vehicle Tracking in Low Frame Rate Scenes using Instance Segmentation,” in 2022 IEEE 14th International Conference on Humanoid, Nanotechnology, Information Technology, Communication and Control, Environment, and Management (HNICEM), Dec. 2022, pp. 1–5. doi: 10.1109/HNICEM57413.2022.10109390.
+
+[2] A. K. Brillantes, E. Sybingco, R. K. Billones, A. Bandala, A. Fillone, and E. Dadios, “Observation-Centric with Appearance Metric for Computer Vision-Based Vehicle Counting,” JAIT, vol. 14, no. 6, pp. 1261–1272, 2023, doi: 10.12720/jait.14.6.1261-1272.
