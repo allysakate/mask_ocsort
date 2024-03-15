@@ -3,6 +3,7 @@ import csv
 import math
 import yaml
 import json
+import tqdm
 import argparse
 from typing import List
 from functools import reduce
@@ -20,13 +21,10 @@ from detectron2.modeling.poolers import ROIPooler
 from detectron2.structures import Boxes
 from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.layers import paste_masks_in_image
-from models.config import get_cfg
+from detectron2.config import get_cfg
 from models.utils.datasets import letterbox
 from models.utils.general import non_max_suppression_mask_conf
-from models.feature_extractor import FeatExtractor
-from trackers.deep_sort import tracker, detection, nn_matching
 from trackers.ocsort_tracker import OCSort
-from trackers.tracking_utils.timer import Timer
 from utils import (
     initiate_logging,
     get_config,
@@ -36,10 +34,6 @@ from utils import (
     calculate_iou,
     colors_instance,
 )
-from progress_bar import ProgressBar
-
-IOU_LIST = []
-SCALE_LIST = []
 
 
 class ParameterManager:
@@ -56,22 +50,19 @@ class ParameterManager:
         model_device (str):     device parameter for model [cpu, cuda:0]
         frame_skip (int):       number of frames to be skipped when processing
         tracker_name (str):     tracker name based on feature and ocsort
-        _tracker (object):      tracker object [OCSort, DeepSORT]
+        _tracker (object):      tracker object [OCSort]
         predictor (object):     model predict
         metadata (object):      testing metadata
     """
 
     def __init__(self, yml_path: str):
         self.config = get_config(yml_path)
-        self.matcher = self.config.matcher
-        if self.matcher:
-            self.matcher = self.config.matcher.upper()
         self.model_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.predictor_name = None
         self.tracker_name = None
         self.text_filename = None
         self.folder_name = None
-        self.use_ocsort = None
+        self.use_maskocsort = None
         self.with_feature = None
         self.frame_use = self.config.frame_use
         self.iou_weight = self.config.iou_weight
@@ -79,20 +70,16 @@ class ParameterManager:
         self.min_hits = self.config.min_hits
         self.max_age = self.config.max_age
 
-    def set_text_filename(self):
-        self.text_filename = f"{self.frame_use}FPS"
-
     def set_useocsort_feat(self):
-        if self.tracker_name in ["MASKOCSORT", "DEEPOCSORT"]:
-            self.use_ocsort = True
+        if self.use_maskocsort:
+            self.tracker_name = "MASKOCSORT"
             self.with_feature = True
-        elif self.tracker_name == "OCSORT":
-            self.use_ocsort = True
+        else:
+            self.tracker_name = "OCSORT"
             self.with_feature = False
-        elif self.tracker_name == "DEEPSORT":
-            self.use_ocsort = False
-            self.with_feature = True
 
+    def set_text_filename(self):
+        self.text_filename = f"{self.tracker_name}_{self.predictor_name}_{self.frame_use}FPS"
 
 class LayerHook:
     """Taps into the intermediate layer of a CNN Model"""
@@ -144,11 +131,10 @@ class VideoProcessor:
         self.param = param
         self.is_yolo = is_yolo
         if self.param.config.image_path:
-            print(self.param.config.image_path)
             self.video = sorted(
                 glob(os.path.join(self.param.config.image_path, "*.jpg"))
             )
-            self.fps = 25
+            self.fps = self.param.config.image_fps
             first_frame_path = self.video[0]
             self.basename = os.path.dirname(first_frame_path).split("/")[-1]
             first_frame = cv2.imread(first_frame_path)
@@ -172,26 +158,10 @@ class VideoProcessor:
             self.predictor = self.set_det2model()
         else:
             self.predictor = self.set_yolomodel()
-        self.output_dir = create_output(
-            param.config.output_dir, f"{self.basename}-test/{param.tracker_name}/data"
-        )
-        self.det_dir = create_output(
-            param.config.output_dir,
-            f"{self.basename}-test/{param.tracker_name}/{param.text_filename}",
-        )
-        self.raw_dir = create_output(self.det_dir, "raw")
-        self.image_dir = create_output(self.det_dir, "images")
-        self.data_attr = create_output(self.det_dir, "params")
-        self.data_assoc = create_output(self.det_dir, "assoc")
-        self.det_res_dir = create_output(self.det_dir, "det")
-        if param.matcher == "COSINESL":
-            if param.model_device == "cuda:0":
-                use_cuda = True
-            else:
-                use_cuda = False
-            # Extractor: "checkpoints/CosineMetric_Learning.t7", use_cuda=use_cuda
-            self.extractor = FeatExtractor("alexnet-fc7", use_cuda=use_cuda)
-        log_dir = create_output(self.det_dir, "logs")
+        self.output_dir = create_output(param.config.output_dir, param.text_filename)
+        self.image_dir = create_output(self.output_dir, "images")
+        self.det_res_dir = create_output(self.output_dir, "det")
+        log_dir = create_output(self.output_dir, "logs")
         self.logger = initiate_logging(log_dir, param.text_filename)
         self.bbox_ids = []
         self.bbox_list = []
@@ -216,63 +186,13 @@ class VideoProcessor:
         self.class_names = model.names
         return model
 
-    def set_frame(self, image):
+    def yolo_set_frame(self, image):
         image = letterbox(image, 640, stride=64, auto=True)[0]
         image = transforms.ToTensor()(image)
         image = torch.tensor(np.array([image.numpy()]))
         image = image.to(self.device)
         image = image.half()
         return image
-
-    def set_det2model(self):
-        """Load config from file and command-line arguments
-        Returns:
-            configuration
-        """
-        configuration = get_cfg()
-        configuration.merge_from_file(self.param.config.config_file)
-        configuration.merge_from_list(["MODEL.WEIGHTS", self.param.config.weight_file])
-        configuration.MODEL.DEVICE = self.param.model_device
-        # Set score_threshold for builtin models
-        configuration.MODEL.RETINANET.SCORE_THRESH_TEST = (
-            self.param.config.confidence_threshold
-        )
-        configuration.MODEL.ROI_HEADS.SCORE_THRESH_TEST = (
-            self.param.config.confidence_threshold
-        )
-        if self.param.predictor_name == "SOLOV2":
-            configuration.MODEL.FCOS.INFERENCE_TH_TEST = (
-                self.param.config.confidence_threshold
-            )
-            configuration.MODEL.MEInst.INFERENCE_TH_TEST = (
-                self.param.config.confidence_threshold
-            )
-        # configuration.MODEL.SOLOV2.SCORE_THR = self.param.config.confidence_threshold
-        configuration.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH = (
-            self.param.config.confidence_threshold
-        )
-        configuration.freeze()
-        model = DefaultPredictor(configuration)
-        metadata = MetadataCatalog.get(
-            configuration.DATASETS.TEST[0]
-            if len(configuration.DATASETS.TEST)
-            else "__unused"
-        )
-        self.period_threshold = metadata.get("period_threshold", 0)
-        self.class_names = metadata.get("thing_classes", None)
-        return model
-
-    def set_hooker(self, hooker=None):
-        if self.param.predictor_name == "MASKRCNN":
-            if (
-                self.param.tracker_name in ["DEEPSORT", "MASKOCSORT"]
-                and self.param.matcher is None
-            ):
-                hooker = LayerHook()
-                if self.param.predictor_name == "MASKRCNN":
-                    node = "roi_heads.mask_pooler"  # (19, 256, 14, 14)
-                hooker.register(self.predictor.model, [node])
-        return hooker
 
     def yolo_process(self, predictions, frame_dim, orig_image_dim):
         inf_out, _, attn, _, bases, sem_output = (
@@ -331,7 +251,55 @@ class VideoProcessor:
         feat_masks = feat_masks.cpu().numpy()
         return feat_masks, seg_masks, boxes, scores, classes
 
-    def det2_process(self, predictions, mask_pool=None, matcher=None):
+
+    def set_det2model(self):
+        """Load config from file and command-line arguments
+        Returns:
+            configuration
+        """
+        configuration = get_cfg()
+        configuration.merge_from_file(self.param.config.config_file)
+        configuration.merge_from_list(["MODEL.WEIGHTS", self.param.config.weight_file])
+        configuration.MODEL.DEVICE = self.param.model_device
+        # Set score_threshold for builtin models
+        configuration.MODEL.RETINANET.SCORE_THRESH_TEST = (
+            self.param.config.confidence_threshold
+        )
+        configuration.MODEL.ROI_HEADS.SCORE_THRESH_TEST = (
+            self.param.config.confidence_threshold
+        )
+        if self.param.predictor_name == "SOLOV2":
+            configuration.MODEL.FCOS.INFERENCE_TH_TEST = (
+                self.param.config.confidence_threshold
+            )
+            configuration.MODEL.MEInst.INFERENCE_TH_TEST = (
+                self.param.config.confidence_threshold
+            )
+        # configuration.MODEL.SOLOV2.SCORE_THR = self.param.config.confidence_threshold
+        configuration.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH = (
+            self.param.config.confidence_threshold
+        )
+        configuration.freeze()
+        model = DefaultPredictor(configuration)
+        metadata = MetadataCatalog.get(
+            configuration.DATASETS.TEST[0]
+            if len(configuration.DATASETS.TEST)
+            else "__unused"
+        )
+        self.period_threshold = metadata.get("period_threshold", 0)
+        self.class_names = metadata.get("thing_classes", None)
+        return model
+
+    def set_hooker(self, hooker=None):
+        if self.param.predictor_name == "MASKRCNN":
+            if self.param.tracker_name in ["MASKOCSORT"]:
+                hooker = LayerHook()
+                if self.param.predictor_name == "MASKRCNN":
+                    node = "roi_heads.mask_pooler"  # (19, 256, 14, 14)
+                hooker.register(self.predictor.model, [node])
+        return hooker
+
+    def det2_process(self, predictions, mask_pool=None):
         """Filter predictions
         Args:
             predictions (Instances): the output of an instance detection/segmentation
@@ -387,20 +355,17 @@ class VideoProcessor:
             pred_masks = None if pred_masks is None else pred_masks[visibilities]
             seg_masks = pred_masks
 
-            if matcher is None:
-                if mask_pool is None:
-                    if predictions.has("feat_masks"):
-                        feat_masks = predictions.feat_masks
-                        feat_masks = feat_masks[filter_mask]
-                    else:
-                        feat_masks = None
-                    feat_masks = (
-                        None if feat_masks is None else feat_masks[visibilities]
-                    )
+            if mask_pool is None:
+                if predictions.has("feat_masks"):
+                    feat_masks = predictions.feat_masks
+                    feat_masks = feat_masks[filter_mask]
                 else:
-                    feat_masks = mask_pool
+                    feat_masks = None
+                feat_masks = (
+                    None if feat_masks is None else feat_masks[visibilities]
+                )
             else:
-                feat_masks = None
+                feat_masks = mask_pool
 
             # Display in largest to smallest order to reduce occlusion.
             areas = None
@@ -454,33 +419,11 @@ class VideoProcessor:
             return color
 
         im = np.ascontiguousarray(np.copy(image))
-        # im_h, im_w = im.shape[:2]
-
-        # top_view = np.zeros([im_w, im_w, 3], dtype=np.uint8) + 255
-
-        # text_scale = max(1, image.shape[1] / 1600.)
-        # text_thickness = 2
-        # line_thickness = max(1, int(image.shape[1] / 500.))
         text_scale = 2
         text_thickness = 2
         line_thickness = 3
 
-        # radius = max(5, int(im_w / 140.0))
-        # cv2.putText(
-        #     im,
-        #     "frame: %d fps: %.2f num: %d" % (frame_id, fps, len(tlwhs)),
-        #     (0, int(15 * text_scale)),
-        #     cv2.FONT_HERSHEY_PLAIN,
-        #     2,
-        #     (0, 0, 255),
-        #     thickness=2,
-        # )
-
         for i, tlwh in enumerate(tlwhs):
-            # if classes:
-            #     label = classes[i]
-            # else:
-            #     label = None
             x1, y1, w, h = tlwh
             intbox = tuple(map(int, (x1, y1, x1 + w, y1 + h)))
             obj_id = int(obj_ids[i])
@@ -500,16 +443,6 @@ class VideoProcessor:
                 (0, 0, 255),
                 thickness=text_thickness,
             )
-            # if label:
-            #     cv2.putText(
-            #         im,
-            #         label,
-            #         (intbox[0], intbox[1] + 20),
-            #         cv2.FONT_HERSHEY_PLAIN,
-            #         text_scale,
-            #         (0, 0, 255),
-            #         thickness=text_thickness,
-            #     )
         return im
 
     def filter_box(self, box, frame=None):
@@ -520,11 +453,10 @@ class VideoProcessor:
             is_included, frame
         """
         is_included = True
-        # area = (box[2] - box[0]) * (box[3] - box[1])
         if self.param.config.roi:
             for roi in self.param.config.roi:
                 roi_iop = get_IOP(roi, box)
-                condition = roi_iop < self.param.config.iop_threshold  # and area > 5900
+                condition = roi_iop < self.param.config.iop_threshold
                 if not condition:
                     is_included = False
                     break
@@ -544,14 +476,6 @@ class VideoProcessor:
             image_mask[:, :, i] = masks.astype(int)
         image_mask[image_mask == 1] = 255
         result = cv2.bitwise_and(image_copy, image_mask)
-        # contours, _ = cv2.findContours(image=mask_reformed,mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE)
-        # # or you can also method=cv2.CHAIN_APPROX_NONE
-        # # check the contours
-        # # Mask input image with binary mask
-        # result = cv2.bitwise_and(image, mask_reformed)
-        # # Color background white
-        # result[mask_reformed==0] = 255 # Optional
-        # cv2.fillPoly(result, pts=[contours], color=(255, 0, 0))
         cv2.imshow("result", result)
         cv2.waitKey()
         return result
@@ -598,7 +522,6 @@ class VideoProcessor:
             )
             area = (box[2] - box[0]) * (box[3] - box[1])
             scale = math.sqrt(area)
-            SCALE_LIST.append(scale)
             i_text = f"{i+1}, Scale: {scale:.2f}"
             cv2.putText(
                 im,
@@ -680,11 +603,8 @@ class VideoProcessor:
 
     def ocsort(
         self,
-        data,
-        raw_img,
         frame_id,
         feat_masks,
-        seg_masks,
         boxes,
         scores,
         classes,
@@ -692,13 +612,10 @@ class VideoProcessor:
         trk_dict,
         det_results,
         class_names,
-        width,
     ):
         detections = []
-        # cnt = 0
-        img_v = self.visualize(raw_img, boxes)
-        for feat, mask, box, score, label in zip(
-            feat_masks, seg_masks, boxes, scores, classes
+        for feat, box, score, label in zip(
+            feat_masks, boxes, scores, classes
         ):
             is_included, _ = self.filter_box(box)
             if is_included and int(label) in self.param.config.class_list:
@@ -709,39 +626,19 @@ class VideoProcessor:
                 )
                 det = np.insert(box, 4, score)
                 det = np.insert(det, 5, label)
-                if self.param.matcher is None and self.param.with_feature:
-                    if self.param.predictor_name == "SOLOV2":
-                        max_pool = nn.MaxPool1d(3, stride=12)
-                        feat = max_pool(feat).numpy()
-                    elif self.param.predictor_name == "MASKRCNN":
+                if self.param.with_feature:
+                    if self.param.predictor_name == "MASKRCNN":
                         max_pool = nn.MaxPool2d(3, stride=3)
                         feat = max_pool(feat).numpy()
                     feat = np.array(feat).flatten()
-                elif self.param.matcher == "COSINESL" and self.param.with_feature:
-                    # new_image = self.mask2polygon(raw_img, mask)
-                    crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
-                    is_crop = any(v == 0 for v in crop.shape)
-                    if is_crop:
-                        is_included = False
-                    else:
-                        feat = self.extractor(crop)
                 else:
                     feat = np.array(feat).flatten()
                 if is_included:
                     det = np.asarray(np.insert(det, 6, feat))
                     detections.append(det)
         if detections:
-            assoc_img, data, targets = self._tracker.update(
-                data,
-                frame_id,
-                raw_img,
-                np.asarray(detections),
-                self.param.with_feature,
-                self.param.matcher,
-                width,
-            )
+            targets = self._tracker.update(np.asarray(detections),self.param.with_feature)
         else:
-            assoc_img = raw_img
             targets = []
         track_tlwhs = []
         track_scores = []
@@ -759,11 +656,9 @@ class VideoProcessor:
             tscore = tlbrs[4]
             tclass = int(tlbrs[5])
             tid = tlbrs[6]
-            # vertical = box_width / box_height > self.param.config._aspect_ratio_thresh
             if (
                 box_width * box_height
                 > self.param.config._min_box_area_thresh
-                # and not vertical
             ):
                 track_tlwhs.append(tlwh)
                 track_ids.append(tid)
@@ -788,9 +683,6 @@ class VideoProcessor:
                 )
 
         return (
-            assoc_img,
-            data,
-            img_v,
             track_tlwhs,
             track_ids,
             track_classes,
@@ -799,122 +691,25 @@ class VideoProcessor:
             det_results,
         )
 
-    def deepsort(
-        self,
-        raw_img,
-        frame_id,
-        feat_masks,
-        boxes,
-        scores,
-        classes,
-        trk_results,
-        det_results,
-        class_names,
-    ):
-        detections = []
-        for feat, box, score, label in zip(feat_masks, boxes, scores, classes):
-            is_included, _ = self.filter_box(box)
-            if is_included and int(label) in self.param.config.class_list:
-                # class_name = class_names[int(label)]
-                intbox = list(map(int, box))
-                det_results.append(
-                    f"car {float(score)} {intbox[0]} {intbox[1]} {intbox[2]-intbox[0]} {intbox[3]-intbox[1]}\n"
-                )
-                if self.param.matcher is None:
-                    feat = np.array(feat).flatten()
-                elif self.param.matcher == "COSINESL":
-                    # x_feat = np.array(feat).flatten()
-                    crop = raw_img[intbox[1] : intbox[3], intbox[0] : intbox[2]]
-                    # crop = cv2.resize(crop, (256, 256))
-                    # gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                    # feat = np.array(gray).flatten()
-                    is_crop = any(v == 0 for v in crop.shape)
-                    if is_crop:
-                        is_included = False
-                    else:
-                        feat = self.extractor(crop)
-                    # shape = min(feat.shape)
-                    # feat = np.resize(feat, (shape, shape)).flatten()
-                if is_included:
-                    det = detection.Detection(
-                        np.array(box), score, class_names[int(label)], feat
-                    )
-                    detections.append(det)
-        self._tracker.predict()
-        self._tracker.update(detections)
-        track_tlwhs = []
-        track_ids = []
-        track_classes = []
-        for track in self._tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue
-            tlwh = track.to_tlwh()
-            box_width = tlwh[2]
-            box_height = tlwh[3]
-            tid = track.track_id
-            # vertical = box_width / box_height > self.param.config._aspect_ratio_thresh
-            if (
-                box_width * box_height
-                > self.param.config._min_box_area_thresh
-                # and not vertical
-            ):
-                track_tlwhs.append(tlwh)
-                track_ids.append(tid)
-                track_classes.append(track.classification)
-                trk_results.append(
-                    f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
-                )
-        return track_tlwhs, track_ids, track_classes, trk_results, det_results
-
-    def mask_to_polygon(self, seg_masks, scores, boxes, frame_id):
-        """Converts binary mask to polygon
-        https://github.com/cocodataset/cocoapi/issues/131
-        """
-        segm_list, conf_list, box_list = [], [], []
-        for segm, score, box in zip(seg_masks, scores, boxes):
-            binary_mask = np.array(segm.detach().cpu().numpy(), dtype=np.uint8)
-            contours = measure.find_contours(binary_mask, 0.5)
-            for contour in contours:
-                contour = np.flip(contour, axis=1)
-                segmentation = contour.ravel().tolist()
-                segm_list.append(segmentation)
-                conf_list.append(score)
-                box_list.append([frame_id] + list(box.detach().cpu().numpy()))
-        if len(conf_list):
-            return segm_list, sum(conf_list) / len(conf_list), box_list
-        else:
-            return [], 0, []
-
     def perform_task(
         self,
         frame,
         frame_id,
-        data,
         det_results,
         trk_results,
-        segm_dict,
         trk_dict,
-        timer,
-        det_timer,
-        trk_timer,
         vid_writer,
     ):
         raw_img = frame
-        img_v = frame.copy()
-        frame_copy = frame.copy()
         res_image = frame.copy()
-        timer.tic()
         if int(frame_id % self.frame_skip) == 0 and frame_id != 0:
-            raw_path = os.path.join(self.raw_dir, f"{frame_id}.jpg")
-            cv2.imwrite(raw_path, raw_img)
-            det_timer.tic()
             hooker = self.set_hooker()
             # try:
             if not self.is_yolo:
                 predictions = self.predictor(frame)
                 predictions = predictions["instances"].to(torch.device("cpu"))
 
-                if hooker and self.param.matcher is None:
+                if hooker:
                     mask_pool = hooker.outputs[-1].cpu()
                     hooker.remove()
                 else:
@@ -922,116 +717,67 @@ class VideoProcessor:
                 if predictions:
                     (
                         feat_masks,
-                        seg_masks,
+                        _,
                         boxes,
                         scores,
                         classes,
                     ) = self.det2_process(
                         predictions,
                         mask_pool,
-                        self.param.matcher,
                     )
             else:
-                frame = self.set_frame(frame)
+                frame = self.yolo_set_frame(frame)
                 _, _, f_height, f_width = frame.shape
                 predictions = self.predictor(frame)
-                (feat_masks, seg_masks, boxes, scores, classes,) = self.yolo_process(
+                (feat_masks, _, boxes, scores, classes,) = self.yolo_process(
                     predictions, (f_height, f_width), (self.height, self.width)
                 )
-            segmentations, conf_score, segm_boxes = self.mask_to_polygon(
-                seg_masks, scores, boxes, frame_id
-            )
-            segm_dict["box"].append(segm_boxes)
-            segm_dict["segm"].append(segmentations)
-            segm_dict["conf"].append(conf_score)
-            det_timer.toc()
-            trk_timer.tic()
+
             if len(boxes):
-                # TODO: tracking
-                if not self.param.use_ocsort:
-                    (
-                        track_tlwhs,
-                        track_ids,
-                        track_classes,
-                        trk_results,
-                        det_results,
-                    ) = self.deepsort(
-                        frame_copy,
-                        frame_id,
-                        feat_masks,
-                        boxes,
-                        scores,
-                        classes,
-                        trk_results,
-                        det_results,
-                        self.class_names,
-                    )
-                else:
-                    (
-                        assoc_img,
-                        data,
-                        img_v,
-                        track_tlwhs,
-                        track_ids,
-                        track_classes,
-                        trk_results,
-                        trk_dict,
-                        det_results,
-                    ) = self.ocsort(
-                        data,
-                        frame_copy,
-                        frame_id,
-                        feat_masks,
-                        seg_masks,
-                        boxes,
-                        scores,
-                        classes,
-                        trk_results,
-                        trk_dict,
-                        det_results,
-                        self.class_names,
-                        self.width,
-                    )
-                trk_timer.toc()
-                timer.toc()
+                (
+                    track_tlwhs,
+                    track_ids,
+                    track_classes,
+                    trk_results,
+                    trk_dict,
+                    det_results,
+                ) = self.ocsort(
+                    frame_id,
+                    feat_masks,
+                    boxes,
+                    scores,
+                    classes,
+                    trk_results,
+                    trk_dict,
+                    det_results,
+                    self.class_names,
+                )
                 res_image = self.plot_tracking(
                     raw_img,
                     track_tlwhs,
                     track_ids,
                     track_classes,
                     frame_id=frame_id + 1,
-                    fps=1.0 / timer.average_time,
                 )
-                res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
-                for box in boxes:
-                    _, res_image = self.filter_box(box, res_image)
-                cv2.imwrite(res_path, res_image)
-                # Write det lines fro evaluation
-                new_gt_file = open(
-                    os.path.join(self.det_res_dir, f"{frame_id:06d}.txt"), "w"
-                )
-                new_gt_file.writelines(det_results)
-                new_gt_file.close()  # to change file access modes
-
-            # except Exception as e:
-            #     print(e)
-        else:
-            res_image = raw_img
-
-        if self.param.config.is_save_result:
-            vid_writer.write(res_image)
-            iou_path = os.path.join(self.data_attr, f"{frame_id}.jpg")
-            if img_v.any():
-                # Stack the images horizontally
-                stacked_image = cv2.hconcat([img_v, res_image])
-                cv2.imwrite(iou_path, stacked_image)
-        return data, det_results, trk_results, segm_dict, trk_dict
+            else:
+                res_image = raw_img
+            res_path = os.path.join(self.image_dir, f"{frame_id}.jpg")
+            for box in boxes:
+                _, res_image = self.filter_box(box, res_image)
+            cv2.imwrite(res_path, res_image)
+            # Write det lines from evaluation
+            new_gt_file = open(
+                os.path.join(self.det_res_dir, f"{frame_id:06d}.txt"), "w"
+            )
+            new_gt_file.writelines(det_results)
+            new_gt_file.close()  # to change file access modes
+            if self.param.config.is_save_result:
+                vid_writer.write(res_image)
+        return det_results, trk_results, trk_dict
 
     def process(self):
-        # current_time = time.localtime()
-        # timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
         if self.param.config.is_save_result:
-            save_path = os.path.join(self.det_dir, f"{self.basename}.mp4")
+            save_path = os.path.join(self.output_dir, f"{self.basename}.mp4")
             self.logger.info(f"video save_path is {save_path}")
             vid_writer = cv2.VideoWriter(
                 save_path,
@@ -1040,95 +786,51 @@ class VideoProcessor:
                 (int(self.width), int(self.height)),
             )
 
-        if not self.param.use_ocsort:
-            metric = nn_matching.NearestNeighborDistanceMetric("cosine", 0.2, None)
-            self._tracker = tracker.Tracker(metric)
-        else:
-            self._tracker = OCSort(
-                iou_weight=self.param.iou_weight,
-                inertia=self.param.vd_weight,
-                max_age=self.param.max_age,
-                min_hits=self.param.min_hits,
-                out_folder=self.data_assoc,
-            )
+        self._tracker = OCSort(
+            iou_weight=self.param.iou_weight,
+            inertia=self.param.vd_weight,
+            max_age=self.param.max_age,
+            min_hits=self.param.min_hits,
+        )
 
-        timer = Timer()
-        det_timer = Timer()
-        trk_timer = Timer()
         frame_id = 0
         det_results = []
         trk_results = []
         trk_dict = {}
-        segm_dict = {"box": [], "conf": [], "segm": []}
-        data = []
-        prog_bar = ProgressBar(int(self.num_frames), fmt=ProgressBar.FULL)
         if self.param.config.image_path:
-            for image in self.video:
+            for image in tqdm.tqdm(self.video):
                 basename, _ = os.path.splitext(os.path.basename(image))
                 frame_id = int(basename.replace("img", ""))  # - 1
-                if frame_id % self.fps == 0:
-                    self.logger.info(
-                        "Processing frame {} ({:.2f} fps)".format(
-                            frame_id, 1.0 / max(1e-5, timer.average_time)
-                        )
-                    )
                 frame = cv2.imread(image)
-                data, det_results, trk_results, segm_dict, trk_dict = self.perform_task(
+                det_results, trk_results, trk_dict = self.perform_task(
                     frame,
                     frame_id,
-                    data,
                     det_results,
                     trk_results,
-                    segm_dict,
                     trk_dict,
-                    timer,
-                    det_timer,
-                    trk_timer,
                     vid_writer,
                 )
-                # Update progress bar
-                prog_bar.current += 1
-                prog_bar()
         else:
             frame_id = 0
+            total_frames = int(self.video.get(cv2.CAP_PROP_FRAME_COUNT))
+            prog_bar = tqdm.tqdm(total=int(total_frames))
             while True:
                 ret_val, frame = self.video.read()
                 if ret_val:
-                    # try:
-                    (
-                        data,
-                        det_results,
-                        trk_results,
-                        segm_dict,
-                        trk_dict,
-                    ) = self.perform_task(
+                    det_results, trk_results, trk_dict = self.perform_task(
                         frame,
                         frame_id,
-                        data,
                         det_results,
                         trk_results,
-                        segm_dict,
                         trk_dict,
-                        timer,
-                        det_timer,
-                        trk_timer,
                         vid_writer,
                     )
-                    # except TypeError:
-                    #     print(f"Error in frame: {frame_id}")
                 else:
-                    timer.toc()
-                    self.logger.info(f"Average Time: {timer.average_time}")
-                    self.logger.info(f"Total Time: {timer.total_time}")
-                    self.logger.info(
-                        f"Time: {det_timer.total_time}, {det_timer.average_time}, {trk_timer.total_time}, {trk_timer.average_time}, {timer.total_time}, {timer.average_time}"
-                    )
                     break
                 frame_id += 1
                 # Update progress bar
-                prog_bar.current += 1
-                prog_bar()
-        prog_bar.done()
+                prog_bar.update(1)
+            self.video.release()
 
         if self.param.config.is_save_result:
             res_file = os.path.join(self.output_dir, f"{self.param.text_filename}.txt")
@@ -1136,77 +838,10 @@ class VideoProcessor:
                 f.writelines(trk_results)
             self.logger.info(f"save trk_results to {res_file}")
 
-            ids_to_remove = []
-            for track_id, tlbrs in trk_dict.items():
-                dy = tlbrs[-1][2] - tlbrs[0][2]
-                dx = tlbrs[-1][1] - tlbrs[0][1]
-                length = np.sqrt(dx * dx + dy * dy)
-                if length < 30:
-                    ids_to_remove.append(track_id)
-
-            for track_id in ids_to_remove:
-                del trk_dict[track_id]
-
-            segm_to_remove = []
-            segm_boxes = segm_dict["box"]
-            for track_id, ftlbrs in trk_dict.items():
-                for ftlbr in ftlbrs:
-                    for s_idx, segm_box in enumerate(segm_boxes):
-                        if len(segm_box):
-                            if segm_box[0] == ftlbr[0]:
-                                segm_intbox = list(map(int, segm_box[1:]))
-                                trk_intbox = list(map(int, ftlbr[1:]))
-                                iop = calculate_iou(segm_intbox, trk_intbox)
-                                if iop < 0.8:
-                                    segm_to_remove.append(s_idx)
-                        else:
-                            segm_to_remove.append(s_idx)
-
-            segm_file = os.path.join(
-                self.output_dir, f"{self.param.text_filename}.json"
-            )
-            init_segm_points = segm_dict["segm"]
-            index_mask = [True] * len(init_segm_points)
-            for idx in sorted(segm_to_remove):
-                index_mask[idx] = False
-            segm_points = [
-                value
-                for value, mask_value in zip(init_segm_points, index_mask)
-                if mask_value
-            ]
-            # init_conf_scores = np.array(segm_dict["conf"])
-            # conf_scores = list(init_conf_scores[np.array(index_mask)])
-            # # Create pairs of elements from the first and second lists
-            # pairs = list(zip(conf_scores, segm_points))
-            # # Sort the pairs based on the first list in reverse order
-            # sorted_pairs = sorted(pairs, key=lambda x: x[0], reverse=True)
-            # # Extract the second list elements from the sorted pairs
-            # # Get best 10
-            # best_segm = [pair[1] for pair in sorted_pairs][:10]
-            # Write the dictionary to the file as JSON
-            with open(segm_file, "w", encoding="utf-8") as file:
-                json.dump(segm_points, file)
-
-        # Specify the CSV file path
-        try:
-            csv_file = os.path.join(self.data_attr, "output.csv")
-            # Extract the field names from the first dictionary
-            fieldnames = data[0].keys()
-            # Open the CSV file in write mode
-            with open(csv_file, "w", newline="") as file:
-                writer = csv.DictWriter(file, fieldnames)
-                # Write the header row
-                writer.writeheader()
-                # Write the rows to the CSV file
-                writer.writerows(data)
-            print("CSV file created successfully.")
-        except Exception as e:
-            print(e)
-
 
 def start_process(param, is_yolo=False):
-    param.set_text_filename()
     param.set_useocsort_feat()
+    param.set_text_filename()
     processor = VideoProcessor(param, is_yolo)
     processor.process()
     close_logging(processor.logger)
@@ -1214,55 +849,9 @@ def start_process(param, is_yolo=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", action="store_true", help="if batch ")
-    args = parser.parse_args()
     is_yolo = False
     param = ParameterManager("configs/demo_config.yaml")
-    if args.batch:
-        main_folder = param.config.image_path
-        # for subdir in os.listdir(main_folder):
-        #     param.config.image_path = os.path.join(main_folder, subdir)
-        for frame_use in [1, 5, 25]:
-            param.frame_use = frame_use
-            for predictor in ["SOLOV2"]:
-                param.predictor_name = predictor.upper()
-                param.config.predictor = param.predictor_name
-                if param.predictor_name == "SOLOV2":
-                    param.config.config_file = "configs/SOLOv2/SOLOv2_R50_FPN_3x.yaml"
-                    param.config.weight_file = "checkpoints/SOLOv2_R50_3x.pth"
-                elif param.predictor_name == "MASKRCNN":
-                    param.config.config_file = (
-                        "configs/MaskRCNN/MaskRCNN_R50_FPN_3x.yaml"
-                    )
-                    param.config.weight_file = "checkpoints/MaskRCNN_R50_3x.pkl"
-                elif param.predictor_name == "FASTERRCNN":
-                    param.config.config_file = (
-                        "configs/MaskRCNN/FasterRCNN_R50_FPN_3x.yaml"
-                    )
-                    param.config.weight_file = "checkpoints/FasterRCNN_R50_3x.pkl"
-                elif param.predictor_name == "YOLOV7":
-                    is_yolo = True
-                    param.config.config_file = "configs/YOLOv7_Mask.yaml"
-                    param.config.weight_file = "checkpoints/YOLOv7_Mask.pt"
-                for tracker_name in ["DEEPSORT"]:
-                    param.tracker_name = tracker_name.upper()
-                    if tracker_name in ["MASKOCSORT", "OCSORT"]:
-                        matcher = None
-                    else:
-                        matcher = "COSINESL"
-                    param.matcher = matcher
-                    print(
-                        f"Processing... Tracker: {param.tracker_name}, Predictor: {param.predictor_name}, Matcher: {param.matcher} Frame Use: {param.frame_use}"
-                    )
-                    start_process(param, is_yolo)
-                    print()
-                is_yolo = False
-    else:
-        param = ParameterManager("configs/demo_config.yaml")
-        param.predictor_name = param.config.predictor.upper()
-        param.tracker_name = param.config.tracker.upper()
-        if param.predictor_name == "YOLOV7":
-            is_yolo = True
-        start_process(param, is_yolo)
-    print(min(IOU_LIST), max(IOU_LIST))
-    print(min(SCALE_LIST), max(SCALE_LIST))
+    param.predictor_name = param.config.predictor.upper()
+    if param.predictor_name == "YOLOV7":
+        is_yolo = True
+    start_process(param, is_yolo)

@@ -247,7 +247,6 @@ class OCSort(object):
         inertia=0.2,
         iou_weight=0.7,
         use_byte=False,
-        out_folder=None,
     ):
         """
         Sets key parameters for SORT
@@ -261,19 +260,13 @@ class OCSort(object):
         self.asso_func = ASSO_FUNCS[asso_func]
         self.inertia = inertia
         self.iou_weight = iou_weight
-        self.out_folder = out_folder
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
     def update(
         self,
-        data,
-        frame_id,
-        raw_img,
         dets,
         with_feature=False,
-        desc_matcher=None,
-        width=1920,
     ):
         """
         Params:
@@ -283,7 +276,6 @@ class OCSort(object):
         Returns the a similar array, where the last column is the object ID.
         NOTE: The number of objects returned may differ from the number of detections provided.
         """
-        img = raw_img.copy()
         length = dets.shape[1]
         self.frame_count += 1
         # get predicted locations from existing trackers.
@@ -317,10 +309,7 @@ class OCSort(object):
         )
 
         # First round of association
-        assoc_img, data, matched, unmatched_dets, unmatched_trks = associate(
-            data,
-            frame_id,
-            img,
+        matched, unmatched_dets, unmatched_trks = associate(
             dets,
             trks,
             self.iou_threshold,
@@ -328,10 +317,8 @@ class OCSort(object):
             k_observations,
             self.inertia,
             self.iou_weight,
-            self.out_folder,
             length,
             with_feature,
-            desc_matcher,
         )
         for m in matched:
             self.trackers[m[1]].update(dets[m[0], :])
@@ -371,22 +358,6 @@ class OCSort(object):
         trk_dets = []
         i = len(self.trackers)
         for trk in reversed(self.trackers):
-            # obs_keys = list(trk.observations.keys())
-            # num_obs = len(obs_keys)
-            # if num_obs > 1:
-            # bbox1 = trk.observations[obs_keys[-2]][:4]
-            # bbox2 = trk.observations[obs_keys[-1]][:4]
-            # distance, quad =  distance_quadrant(bbox1, bbox2)
-            # norm_distance = (distance/num_obs)/width
-            # if num_obs < self.min_hits:
-            #     trk.quadrants.append(quad)
-            #     trk.distances.append(distance)
-            # if norm_distance >= 0.1:
-            #     max_dst_idx = trk.distances.index(max(trk.distances))
-            #     max_dst_quad = trk.quadrants[max_dst_idx]
-            #     rpt_quad = max(trk.quadrants,key=trk.quadrants.count)
-            #     if max_dst_quad != quad and rpt_quad != quad:
-            #         trk.is_drop = True
             if trk.last_observation[:4].sum() < 0:
                 d = trk.get_state()[0]
             else:
@@ -398,20 +369,12 @@ class OCSort(object):
             if (trk.time_since_update < 1) and (
                 trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits
             ):
-                # ) and not trk.is_drop:
-                # +1 as MOT benchmark requires positive
                 trk_dets.append(d)
                 result = np.insert(d, 4, trk.conf_score)
                 result = np.insert(result, 5, trk.category)
                 ret.append(np.concatenate((result, [trk.id + 1])).reshape(1, -1))
             i -= 1
-            # remove dead tracklet
             if trk.time_since_update > self.max_age:
-                # if trk.time_since_update > self.max_age or (
-                #     with_feature
-                #     and trk.time_since_update > self.max_age / 3
-                #     and trk.is_drop
-                # ):
                 self.trackers.pop(i)
 
         trk_dets = np.array(trk_dets)
@@ -430,5 +393,5 @@ class OCSort(object):
                 self.trackers.append(trk)
 
         if len(ret) > 0:
-            return assoc_img, data, np.concatenate(ret)
-        return assoc_img, data, np.empty((0, length))
+            return np.concatenate(ret)
+        return np.empty((0, length))

@@ -142,3 +142,6 @@ dmypy.json
 
 # Logs
 /logs
+
+# Data
+/data
